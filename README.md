@@ -3,7 +3,8 @@
 alc の点呼 (tenko) の Cloudflare Worker `alc-tenko`。rust-alc-api (Cloud Run) の `crates/alc-tenko` を移したもの
 (W7、Refs ippoan/rust-alc-api#680)。型は ippoan/alc-devices-worker と同じ。呼び手は auth-worker の Service Binding だけ。
 
-W7a は読み取りと管理、W7b は点呼のセッション (`/api/tenko/sessions*`) と webhook の送信。予定超過の確認 (毎分) は W7c。
+W7a は読み取りと管理、W7b は点呼のセッション (`/api/tenko/sessions*`) と webhook の送信、W7c は予定超過の確認
+(Cron Trigger で毎分・本番だけ。通知済みの印を先に付けた予定だけ `tenko_overdue` の webhook で送る)。
 
 ## 口 (path・method・JSON の形・status は rust-alc-api と同じ)
 

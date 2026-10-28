@@ -58,3 +58,7 @@ path = "crates/tenko/src/sessions.rs"
 # webhook の送信 (署名・再送・配信の記録。tests/sessions_db.rs が偽物の HTTP で通す。W7b)
 [[files]]
 path = "crates/tenko/src/deliver.rs"
+
+# 予定超過の確認 (印を先に付けて送る。tests/overdue_db.rs が実 DB と偽物の HTTP で通す。W7c)
+[[files]]
+path = "crates/tenko/src/overdue.rs"

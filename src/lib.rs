@@ -1,6 +1,7 @@
 //! 点呼 (tenko) の Worker `alc-tenko` (Refs ippoan/rust-alc-api#680)。crates/tenko の口
 //! (`router`、axum) を workers-rs (`http` / `axum` feature) に載せる。型は ippoan/alc-people-worker と同じ。
 //! DB への経路 (staging = Workers VPC の先の PgBouncer、本番 = Hyperdrive) は [`db::connect`] の 1 か所で出し分ける。
+//! 定時実行 (`scheduled`、Cron Trigger は本番だけ) は予定超過の確認 (crates/tenko の `overdue`、W7c)。
 //!
 //! **この Worker は呼び手を認証しない。** 本番・staging とも workers.dev を開けず (`workers_dev` / `preview_urls` = false、
 //! `routes` を持たない)、入口は auth-worker からの Service Binding だけ (wrangler.toml と scripts/check-exposure.sh が保証する)。
@@ -19,9 +20,13 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Response, StatusCode};
 use futures_util::lock::Mutex;
 use tenko::deliver::{deliver_all, Outbox, Sender};
+use tenko::overdue::{self, DEFAULT_OVERDUE_MINUTES};
 use tenko::{router, AppState, LogSink};
 use tower_service::Service;
-use worker::{console_error, event, Context, Env, HttpRequest, Result, WorkerVersionMetadata};
+use worker::{
+    console_error, event, Context, Env, HttpRequest, Result, ScheduleContext, ScheduledEvent,
+    WorkerVersionMetadata,
+};
 
 fn log_sink() -> LogSink {
     Arc::new(|message| console_error!("{message}"))
@@ -88,4 +93,30 @@ async fn fetch(req: HttpRequest, env: Env, ctx: Context) -> Result<Response<Body
         }
     }
     Ok(resp)
+}
+
+/// 予定超過の確認 (wrangler.toml の `[triggers]` = 毎分、本番だけ)。中身は crates/tenko の `overdue::run`。
+/// 送り終えるまで待つ (rust は Cloud Run の中の 60 秒のループだった)
+#[event(scheduled)]
+async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    let pg = match db::connect(&env).await {
+        Ok(c) => c,
+        Err(e) => {
+            console_error!("tenko: overdue {e}");
+            return;
+        }
+    };
+    let sender = Sender {
+        http: Arc::new(webhook::WorkerHttp),
+        sleeper: Arc::new(webhook::WorkerSleeper),
+    };
+    let now = worker::Date::now().as_millis() as i64;
+    overdue::run(
+        Arc::new(Mutex::new(pg)),
+        sender,
+        log_sink(),
+        now,
+        DEFAULT_OVERDUE_MINUTES,
+    )
+    .await;
 }
