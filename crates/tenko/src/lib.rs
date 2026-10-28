@@ -1,6 +1,6 @@
 //! 点呼 (tenko) の口 (W7a、Refs ippoan/rust-alc-api#680)。rust-alc-api の `crates/alc-tenko` の写しで、
 //! path・method・JSON の形・status は rust と同じ (alc-app の管理画面・キオスク・点呼の電話のアプリがそのまま使う)。
-//! W7a は読み取りと管理: 点呼のセッション (`/tenko/sessions*`) と webhook の送信は W7b、予定超過の確認は W7c。
+//! W7a は読み取りと管理、W7b は点呼のセッション (`/tenko/sessions*`) と webhook の送信。予定超過の確認は W7c。
 //!
 //! - [`records`] — 点呼の記録の一覧・CSV
 //! - [`schedules`] — 点呼の予定 (一覧・作成・一括・1 件・更新・削除・乗務員の未消費の予定)
@@ -11,6 +11,8 @@
 //! - [`daily_health`] — 日々の健康状態
 //! - [`driver_info`] — 乗務員情報 (点呼で見せる 8 つの項目)
 //! - [`call`] — 点呼の電話 (番号・乗務員の管理と、アプリからの登録・点呼の位置の記録)
+//! - [`sessions`] — 点呼のセッション (一覧・1 件・開始と各段・安全判定・運行管理者の判定。W7b)
+//! - [`deliver`] — webhook の送信 (口は [`deliver::Outbox`] に積み、worker が応答の後に `ctx.wait_until` で送る。W7b)
 //!
 //! **点呼の電話のアプリの口 (`/tenko-call/register`・`/tenko-call/tenko`) だけがテナントのヘッダーを要らない** (rust でも公開の口。
 //! テナントは点呼用の番号・電話番号から引く)。ほかは `X-Tenant-ID` を要る (auth-worker が付ける。無い・UUID でない → 401。
@@ -24,11 +26,13 @@ pub mod baselines;
 pub mod call;
 pub mod daily_health;
 pub mod dashboard;
+pub mod deliver;
 pub mod driver_info;
 pub mod failures;
 pub mod models;
 pub mod records;
 pub mod schedules;
+pub mod sessions;
 pub mod webhooks;
 
 use std::sync::Arc;
@@ -52,6 +56,8 @@ pub struct AppState {
     pub pg: Arc<Mutex<PgClient>>,
     pub log: LogSink,
     pub clock: Clock,
+    /// 要求の中で積む webhook の控え (worker が応答の後に送る)
+    pub outbox: deliver::Outbox,
 }
 
 impl AppState {
@@ -93,6 +99,7 @@ pub fn router() -> Router<AppState> {
         .merge(daily_health::router())
         .merge(driver_info::router())
         .merge(call::tenant_router())
+        .merge(sessions::router())
         .route_layer(middleware::from_fn(require_tenant_header))
         .route_layer(middleware::from_fn(with_device_dev_slot));
     let api = tenant.merge(call::public_router());

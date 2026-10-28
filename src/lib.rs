@@ -11,12 +11,14 @@
 
 mod db;
 mod tcp;
+mod webhook;
 
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{HeaderValue, Response, StatusCode};
 use futures_util::lock::Mutex;
+use tenko::deliver::{deliver_all, Outbox, Sender};
 use tenko::{router, AppState, LogSink};
 use tower_service::Service;
 use worker::{console_error, event, Context, Env, HttpRequest, Result, WorkerVersionMetadata};
@@ -32,7 +34,7 @@ fn error_response(status: StatusCode, code: &str) -> Response<Body> {
 }
 
 #[event(fetch)]
-async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<Response<Body>> {
+async fn fetch(req: HttpRequest, env: Env, ctx: Context) -> Result<Response<Body>> {
     // 全リクエストで routing の前に繋ぐ (ippoan/alc-people-worker と同じ)
     let pg = match db::connect(&env).await {
         Ok(c) => c,
@@ -51,16 +53,28 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<Response<Bod
             ));
         }
     };
+    let pg = Arc::new(Mutex::new(pg));
+    let outbox = Outbox::default();
     let state = AppState {
-        pg: Arc::new(Mutex::new(pg)),
+        pg: pg.clone(),
         log: log_sink(),
         // wasm32 で chrono の Utc::now() は使えない (時計を持たない) ので、Date.now() を渡す
         clock: Arc::new(|| worker::Date::now().as_millis() as i64),
+        outbox: outbox.clone(),
     };
     let mut resp = match router().with_state(state).call(req).await {
         Ok(r) => r,
         Err(e) => match e {},
     };
+    // 点呼の節目の webhook は応答の後で送り切る (fire-and-forget の spawn はしない。rust は tokio::spawn だった)
+    let events = outbox.take();
+    if !events.is_empty() {
+        let sender = Sender {
+            http: Arc::new(webhook::WorkerHttp),
+            sleeper: Arc::new(webhook::WorkerSleeper),
+        };
+        ctx.wait_until(deliver_all(pg, sender, log_sink(), events));
+    }
     // どの版が応えたかを応答ヘッダーで分かるようにする。binding が取れなければ何も付けない
     if let Ok(meta) = env.get_binding::<WorkerVersionMetadata>("CF_VERSION_METADATA") {
         if let Ok(v) = HeaderValue::from_str(&meta.id()) {

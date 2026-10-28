@@ -18,8 +18,12 @@ const_format = "0.2"
 # 点呼の記録・機器故障の CSV (rust と同じ csv crate。pure Rust で wasm32 でもビルドできる)
 csv = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# webhook の署名 (HMAC-SHA256。rust の alc_core::webhook と同じ)
+hmac = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 点呼の記録の hash (セッションの JSON の SHA-256。ippoan/alc-measurements-worker と同じ版)
+sha2 = "0.10"
 # 型付きの文の型 (`Type`) と列の型 (uuid・timestamptz・date・time・jsonb・text[])。接続は張らない
 # (wasm 用の feature `js` は直下の worker と alc-worker-db が付ける)
 tokio-postgres = { version = "0.7", default-features = false, features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }

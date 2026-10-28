@@ -245,6 +245,10 @@ pub async fn tenant() -> Uuid {
 pub struct App {
     pub router: Router,
     pub logs: Arc<StdMutex<Vec<String>>>,
+    /// 口が積んだ webhook の控え
+    pub outbox: tenko::deliver::Outbox,
+    /// 口と同じ接続 (webhook の送信を同じ接続で流す)
+    pub pg: Arc<Mutex<PgClient>>,
 }
 
 impl App {
@@ -260,14 +264,19 @@ pub const NOW_MS: i64 = 1_793_151_000_000;
 pub fn build(pg: PgClient) -> App {
     let logs = Arc::new(StdMutex::new(Vec::new()));
     let sink = logs.clone();
+    let pg = Arc::new(Mutex::new(pg));
+    let outbox = tenko::deliver::Outbox::default();
     let state = AppState {
-        pg: Arc::new(Mutex::new(pg)),
+        pg: pg.clone(),
         log: Arc::new(move |m: &str| sink.lock().unwrap().push(m.to_owned())),
         clock: Arc::new(|| NOW_MS),
+        outbox: outbox.clone(),
     };
     App {
         router: router().with_state(state),
         logs,
+        outbox,
+        pg,
     }
 }
 
