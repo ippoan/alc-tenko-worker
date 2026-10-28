@@ -1,0 +1,52 @@
+# 行カバレッジ 100% の登録簿 (ippoan/alc-devices-worker の同名のファイルの形。Refs ippoan/rust-alc-api#680)。
+#
+#   bash scripts/fetch-migrations.sh
+#   TENKO_TEST_ADMIN_DATABASE_URL=... cargo llvm-cov --locked -p tenko --text > cov-tenko.txt
+#   bash scripts/check_coverage_100.sh --use-cache cov-tenko.txt
+#
+# 計測するのは `cargo test -p tenko` の全部 = 各 module の単体テストと tests/*_db.rs (実 DB)。
+# worker 本体 (直下の src/、wasm 専用) は native で計測できないので対象外。
+
+# 口の組み立て・dev の軸の部品
+[[files]]
+path = "crates/tenko/src/lib.rs"
+
+# 行の型・列・頁 (全部の口が使う)
+[[files]]
+path = "crates/tenko/src/models.rs"
+
+# 点呼の記録の一覧・CSV (tests/records_db.rs)
+[[files]]
+path = "crates/tenko/src/records.rs"
+
+# 点呼の予定 (tests/schedules_db.rs)
+[[files]]
+path = "crates/tenko/src/schedules.rs"
+
+# ダッシュボード (tests/schedules_db.rs)
+[[files]]
+path = "crates/tenko/src/dashboard.rs"
+
+# 健康の基準値 (tests/admin_db.rs)
+[[files]]
+path = "crates/tenko/src/baselines.rs"
+
+# 機器故障 (tests/admin_db.rs)
+[[files]]
+path = "crates/tenko/src/failures.rs"
+
+# webhook の設定と配信の記録 (tests/admin_db.rs)
+[[files]]
+path = "crates/tenko/src/webhooks.rs"
+
+# 日々の健康状態 (tests/views_db.rs)
+[[files]]
+path = "crates/tenko/src/daily_health.rs"
+
+# 乗務員情報 (tests/views_db.rs。任意の項目の失敗は読み取り専用のロールで通す)
+[[files]]
+path = "crates/tenko/src/driver_info.rs"
+
+# 点呼の電話 (tests/call_db.rs)
+[[files]]
+path = "crates/tenko/src/call.rs"
