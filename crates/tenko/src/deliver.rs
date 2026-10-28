@@ -8,7 +8,8 @@
 //! - テナントと種類の、有効な設定が無ければ何もしない
 //! - `POST` で JSON を送り、`X-Webhook-Event` と、secret があれば `X-Webhook-Signature: sha256=<HMAC-SHA256 の hex>` を付ける
 //! - 2xx なら成功。失敗なら 1 秒・5 秒待って最大 3 回。毎回 `webhook_deliveries` に記録する (記録の失敗は無視)
-//! - リダイレクトは追わない・10 秒で打ち切る (worker の HTTP の実装 = 直下の src/webhook.rs)
+//! - リダイレクトは追わない・7 秒で打ち切る (rust は 10 秒。3 回 × 7 秒 + 待ち 6 秒 = 最長 27 秒で `wait_until` の 30 秒に収める。
+//!   worker の HTTP の実装 = 直下の src/webhook.rs)
 //!
 //! 配信の記録は本番の軸だけ (dev端末の要求では口が積まないので、ここに dev の行は来ない)。
 

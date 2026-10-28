@@ -40,7 +40,8 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   同じ列 (`INSERT_RECORD`)。**片方を変えたらもう片方も変える。** `TenkoSession` の欄の名前を変えると hash が変わる。
 - **webhook の送信** (`deliver.rs`): 口は送らずに `AppState.outbox` に積み、worker (`src/lib.rs`) が応答の後に `ctx.wait_until` で送る。
   fire-and-forget の spawn はしない。**dev端末の要求では積まない** (rust の `spawn_webhook` と同じ)。署名・再送 (1 秒・5 秒、3 回まで)・
-  配信の記録は rust と同じ。外向きの HTTP (`src/webhook.rs`) はリダイレクトを追わず 10 秒で打ち切る。
+  配信の記録は rust と同じ。外向きの HTTP (`src/webhook.rs`) はリダイレクトを追わず 7 秒で打ち切る (rust は 10 秒。
+  3 回 × 7 秒 + 待ち 1 秒 + 5 秒 = 最長 27 秒で、`wait_until` の上限 = 応答の後 30 秒に収める)。
 - `coverage_100.toml` の登録を外さない。CI の本数 (lib 12・admin_db 3・call_db 2・failures_db 1・records_db 3・schedules_db 2・sessions_db 13・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。

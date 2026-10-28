@@ -1,6 +1,6 @@
 //! webhook の送信 (`tenko::deliver`) の Workers での部品: 外向きの HTTP (`worker::Fetch`) と待ち (`worker::Delay`)。
 //!
-//! rust の `ReqwestWebhookClient` と同じく、リダイレクトは追わない (302 で内部へ回り込ませない) ・10 秒で打ち切る。
+//! rust の `ReqwestWebhookClient` と同じく、リダイレクトは追わない (302 で内部へ回り込ませない)。打ち切りは 7 秒 (rust は 10 秒)。
 //! 値と future は JS の値で `Send` でないので、`worker::send` の `SendFuture` で包む (Workers は単一 thread)。
 //! このファイルは wasm 専用で、CI のテストと coverage の gate の外 (確かめるのは本番の実物)。
 
@@ -12,8 +12,8 @@ use wasm_bindgen::JsValue;
 use worker::send::SendFuture;
 use worker::{Delay, Fetch, Headers, Method, Request, RequestInit, RequestRedirect};
 
-/// 1 回の送信の上限 (rust の reqwest の timeout と同じ)
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// 1 回の送信の上限。rust は 10 秒だが、3 回 × 7 秒 + 待ち 1 秒 + 5 秒 = 最長 27 秒で `wait_until` (応答の後 30 秒まで) に収める
+const TIMEOUT: Duration = Duration::from_secs(7);
 
 pub struct WorkerHttp;
 
