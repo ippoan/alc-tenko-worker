@@ -3,7 +3,7 @@
 点呼 (tenko) の Worker `alc-tenko` (Refs ippoan/rust-alc-api#680)。rust-alc-api の `crates/alc-tenko` を移す先で、
 path・method・JSON の形・status は rust と同じ (alc-app の管理画面・キオスク・点呼の電話のアプリがそのまま使う)。
 直下 = Worker (wasm 専用)、`crates/tenko/` = 口・SQL。W7 は 4 段 (オーナーの決定): W7-0 使われていない口の整理 /
-**W7a 読み取りと管理 (この repo の今の口)** / W7b 点呼のセッション (`/api/tenko/sessions*`・`judgment`) と webhook の送信 /
+W7a 読み取りと管理 / **W7b 点呼のセッション (`/api/tenko/sessions*`・`judgment`) と webhook の送信** (ここまでがこの repo の今の口) /
 W7c 予定超過の確認を Cron Trigger (毎分) へ (通知済みの印を先に付けた行だけ送る)。
 口の一覧は README。auth-worker の振り分け (`ALC_BINDING_ROUTES`) は別の PR。
 
@@ -34,7 +34,14 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
 - 予定超過の分数は rust の既定値の定数 (`dashboard::OVERDUE_MINUTES` = 60。本番の Cloud Run は `TENKO_OVERDUE_MINUTES` を設定していない)。
 - wasm32 で chrono の `Utc::now()` を使わない (時計は `AppState.clock`。Workers は `Date.now()`)。
 - DB は `PgClient::tenant_tx` + `query_typed` 系だけ。名前付き prepared statement 禁止。Row を tx の外へ出さない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 6・admin_db 3・call_db 2・failures_db 1・records_db 3・schedules_db 2・views_db 3)
+- **点呼のセッション** (`sessions.rs`): 口ごとの読み書きを 1 つの transaction にする。点呼の記録 (`tenko_records`、不変) は区切り
+  (`SAVEPOINT`) の中で書き、失敗しても区切りだけ戻してセッションの更新は残す (rust の `let _ = create_tenko_record(..)`)。
+  記録の `record_data` はセッションの JSON、`record_hash` はその SHA-256 で、ippoan/alc-measurements-worker の通常点呼と同じ作り方・
+  同じ列 (`INSERT_RECORD`)。**片方を変えたらもう片方も変える。** `TenkoSession` の欄の名前を変えると hash が変わる。
+- **webhook の送信** (`deliver.rs`): 口は送らずに `AppState.outbox` に積み、worker (`src/lib.rs`) が応答の後に `ctx.wait_until` で送る。
+  fire-and-forget の spawn はしない。**dev端末の要求では積まない** (rust の `spawn_webhook` と同じ)。署名・再送 (1 秒・5 秒、3 回まで)・
+  配信の記録は rust と同じ。外向きの HTTP (`src/webhook.rs`) はリダイレクトを追わず 10 秒で打ち切る。
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 12・admin_db 3・call_db 2・failures_db 1・records_db 3・schedules_db 2・sessions_db 13・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。
