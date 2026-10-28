@@ -3,8 +3,9 @@
 点呼 (tenko) の Worker `alc-tenko` (Refs ippoan/rust-alc-api#680)。rust-alc-api の `crates/alc-tenko` を移す先で、
 path・method・JSON の形・status は rust と同じ (alc-app の管理画面・キオスク・点呼の電話のアプリがそのまま使う)。
 直下 = Worker (wasm 専用)、`crates/tenko/` = 口・SQL。W7 は 4 段 (オーナーの決定): W7-0 使われていない口の整理 /
-W7a 読み取りと管理 / **W7b 点呼のセッション (`/api/tenko/sessions*`・`judgment`) と webhook の送信** (ここまでがこの repo の今の口) /
-W7c 予定超過の確認を Cron Trigger (毎分) へ (通知済みの印を先に付けた行だけ送る)。
+W7a 読み取りと管理 / W7b 点呼のセッション (`/api/tenko/sessions*`・`judgment`) と webhook の送信 /
+**W7c 予定超過の確認を Cron Trigger (毎分) へ (通知済みの印を先に付けた行だけ送る)**。点呼の記録の入口は worker 移行の後に
+測定の口 (alc-measurements-worker) へ一本化する (オーナーの決定。段の口はそれまでのつなぎ)。
 口の一覧は README。auth-worker の振り分け (`ALC_BINDING_ROUTES`) は別の PR。
 
 ## コマンド
@@ -42,7 +43,11 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   fire-and-forget の spawn はしない。**dev端末の要求では積まない** (rust の `spawn_webhook` と同じ)。署名・再送 (1 秒・5 秒、3 回まで)・
   配信の記録は rust と同じ。外向きの HTTP (`src/webhook.rs`) はリダイレクトを追わず 7 秒で打ち切る (rust は 10 秒。
   3 回 × 7 秒 + 待ち 1 秒 + 5 秒 = 最長 27 秒で、`wait_until` の上限 = 応答の後 30 秒に収める)。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 12・admin_db 3・call_db 2・failures_db 1・records_db 3・schedules_db 2・sessions_db 13・views_db 3)
+- **予定超過の確認** (`overdue.rs`、W7c): `src/lib.rs` の `scheduled` (wrangler.toml の `[triggers]` = 毎分、**本番だけ**。triggers は env に
+  継承されるので env.staging / env.local は `crons = []`、check-exposure.sh が検査) から `overdue::run`。送り先の設定の在るテナントを
+  SECURITY DEFINER の関数で引き、**通知済みの印を先に付ける UPDATE** (`sql::CLAIM`) が返した予定だけを `deliver` で送る (2 つの実行が
+  重なっても 1 回だけ。rust は読む → 印 → 送るで重なると 2 回送りえた)。超過は 60 分 (rust の既定。本番に env は無かった)。dev の軸は立てない。
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 13・admin_db 3・call_db 2・failures_db 1・overdue_db 3・records_db 3・schedules_db 2・sessions_db 13・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。

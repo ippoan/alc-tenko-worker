@@ -32,6 +32,11 @@ region = "aws:ap-northeast-1"
 [observability]
 enabled = true
 
+# 予定超過の確認 (src/lib.rs の scheduled → crates/tenko の overdue、W7c)。毎分、本番だけ。
+# triggers は env に継承されるので、env.staging / env.local では crons = [] で止める (scripts/check-exposure.sh が検査する)
+[triggers]
+crons = ["* * * * *"]
+
 # 本番の DB: Cloudflare Hyperdrive の binding TENKO_HYPERDRIVE (src/db.rs)。設定は実行用ロールのもの 1 つを
 # 複数の worker で共有する (worker ごとに作らない。id は ippoan/alc-trouble-worker と同じ)。
 # 接続先・資格情報・TLS は設定の側に在り、ここに書くのは設定の ID だけ。
@@ -66,9 +71,17 @@ service_id = "01a0efa3-57ee-7631-912e-7f261d828127"
 remote = true
 
 
+# 予定超過の確認は本番だけ (トップレベルの triggers を継承させない)
+[env.staging.triggers]
+crons = []
+
 # ローカル (`wrangler dev --env local`) 専用。deploy しない。
 # binding を持たない (binding は env に継承されない) ので、src/db.rs は文字列 DATABASE_URL の段で繋ぐ
 [env.local]
 name = "alc-tenko-local"
 workers_dev = false
 preview_urls = false
+
+# 予定超過の確認は本番だけ (トップレベルの triggers を継承させない)
+[env.local.triggers]
+crons = []

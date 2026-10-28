@@ -95,6 +95,12 @@ for name, e in envs.items():
         if b.get("service") in prod_services:
             err(f"env.{name} の services が本番の Worker {b['service']} を指している (env 用の Worker を指すこと)")
 
+# 定時実行 (予定超過の確認) は本番だけ。triggers は env に継承されるので、トップレベルに crons があれば
+# どの env も crons = [] で止めていること (staging が staging の DB で webhook を送らない・二重に動かない)
+if cfg.get("triggers", {}).get("crons"):
+    for name, e in envs.items():
+        if e.get("triggers", {}).get("crons") != []:
+            err(f"env.{name} が triggers を crons = [] で止めていない (トップレベルの定時実行を継承する。本番だけにする)")
 if errors:
     sys.exit(1)
 print(f"OK: {path} は本番が workers_dev / preview_urls = false・route 無しで、どの env も workers.dev を開けない")

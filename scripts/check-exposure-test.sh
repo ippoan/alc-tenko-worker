@@ -60,6 +60,10 @@ mutate "staging に durable_objects を足す (この worker は DO も Containe
   's = s.replace("[env.staging.observability]", "[[env.staging.durable_objects.bindings]]\nname = \"TENKO_DB\"\nclass_name = \"TenkoDb\"\n\n[env.staging.observability]", 1)'
 mutate "staging に hyperdrive (本番の DB へ届く binding) を足す" \
   's = s.replace("[env.staging.observability]", "[[env.staging.hyperdrive]]\nbinding = \"TENKO_HYPERDRIVE\"\nid = \"x\"\n\n[env.staging.observability]", 1)'
+mutate "staging の triggers を消す (本番の定時実行を継承する)" \
+  's = s.replace("[env.staging.triggers]\ncrons = []\n", "", 1)'
+mutate "local の triggers を消す (本番の定時実行を継承する)" \
+  's = s.replace("[env.local.triggers]\ncrons = []\n", "", 1)'
 mutate "staging の services が本番の Worker を指す (いまは無いが、足したときの検査)" \
   's += "\n[[services]]\nbinding = \"X\"\nservice = \"x-prod\"\n\n[[env.staging.services]]\nbinding = \"X\"\nservice = \"x-prod\"\n"'
 
