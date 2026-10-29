@@ -5,7 +5,7 @@
 //! にするため、測定の口は commit の後に Service Binding でここへ渡す。
 //!
 //! - `POST /internal/webhooks/fire` (`X-Tenant-ID` が要る) — 本文 `{"event_type", "payload"}`。積んで 202 を返す。
-//!   送るのは worker が応答の後に `ctx.wait_until` で ([`crate::sessions`] の口と同じ控え)
+//!   送るのは worker が応答の後に `ctx.wait_until` で ([`crate::deliver::Outbox`] の控え)
 //!
 //! **`/api` の下に置かない。** auth-worker は `/api/...` の path だけを Service Binding に渡すので、この口には外から届かない
 //! (この worker の入口は Service Binding だけ)。auth-worker の振り分けの表にも載せない。

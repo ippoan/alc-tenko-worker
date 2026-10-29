@@ -64,7 +64,7 @@ jobs:
       # 単体テスト (純粋関数) と tests/*_db.rs (口から実 DB まで) を計測つきで 1 回だけ走らせる。
       # テストの target ごとに本数を固定する (減ったら落ちる。テストを足したらここの数も上げる)。
       # 接続文字列は runner の中の使い捨ての DB のもので、secret ではない。
-      - name: lib・admin_db・call_db・failures_db・fire_db・records_db・schedules_db・views_db + Coverage 100% gate
+      - name: lib・admin_db・call_db・deliver_db・failures_db・fire_db・overdue_db・records_db・schedules_db・views_db + Coverage 100% gate
         env:
           TENKO_TEST_ADMIN_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
           CARGO_TERM_COLOR: never
@@ -75,7 +75,7 @@ jobs:
           cargo llvm-cov --locked -p tenko --no-report 2>&1 | tee "$RUNNER_TEMP/tenko-test.txt"
           # target ごとの結果の行だけを見る (ほかの target の行と取り違えない)
           awk '/Running unittests src\/lib\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
-            | grep -Eq '^test result: ok\. 13 passed; 0 failed; 0 ignored'
+            | grep -Eq '^test result: ok\. 9 passed; 0 failed; 0 ignored'
           awk '/Running tests\/admin_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
             | grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored'
           awk '/Running tests\/call_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
@@ -90,8 +90,8 @@ jobs:
             | grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored'
           awk '/Running tests\/schedules_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
             | grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored'
-          awk '/Running tests\/sessions_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
-            | grep -Eq '^test result: ok\. 13 passed; 0 failed; 0 ignored'
+          awk '/Running tests\/deliver_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
+            | grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored'
           awk '/Running tests\/views_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
             | grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored'
           # -p を付けないと直下の package (worker) だけが対象になり、報告が空になる

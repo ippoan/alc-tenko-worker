@@ -1,6 +1,8 @@
 //! 点呼 (tenko) の口 (W7a、Refs ippoan/rust-alc-api#680)。rust-alc-api の `crates/alc-tenko` の写しで、
 //! path・method・JSON の形・status は rust と同じ (alc-app の管理画面・キオスク・点呼の電話のアプリがそのまま使う)。
-//! W7a は読み取りと管理、W7b は点呼のセッション (`/tenko/sessions*`) と webhook の送信、W7c は予定超過の確認 ([`overdue`])。
+//! W7a は読み取りと管理、W7b は webhook の送信、W7c は予定超過の確認 ([`overdue`])。点呼のセッション (`/tenko/sessions*`) は
+//! 点呼の記録の入口の一本化で ippoan/alc-measurements-worker へ移した (点呼セッション・点呼記録を書く worker はあちらだけ。
+//! Refs ippoan/rust-alc-api#680)。
 //!
 //! - [`records`] — 点呼の記録の一覧・CSV
 //! - [`schedules`] — 点呼の予定 (一覧・作成・一括・1 件・更新・削除・乗務員の未消費の予定)
@@ -11,7 +13,6 @@
 //! - [`daily_health`] — 日々の健康状態
 //! - [`driver_info`] — 乗務員情報 (点呼で見せる 8 つの項目)
 //! - [`call`] — 点呼の電話 (番号・乗務員の管理と、アプリからの登録・点呼の位置の記録)
-//! - [`sessions`] — 点呼のセッション (一覧・1 件・開始と各段・安全判定・運行管理者の判定。W7b)
 //! - [`deliver`] — webhook の送信 (口は [`deliver::Outbox`] に積み、worker が応答の後に `ctx.wait_until` で送る。W7b)
 //! - [`overdue`] — 予定超過の確認 (worker の Cron Trigger が毎分呼ぶ。通知済みの印を先に付けた予定だけ送る。W7c)
 //! - [`fire`] — ほかの worker (測定の口) から点呼の節目の webhook を預かる口 (`/internal/webhooks/fire`。`/api` の外)
@@ -36,7 +37,6 @@ pub mod models;
 pub mod overdue;
 pub mod records;
 pub mod schedules;
-pub mod sessions;
 pub mod webhooks;
 
 use std::sync::Arc;
@@ -104,7 +104,6 @@ pub fn router() -> Router<AppState> {
         .merge(daily_health::router())
         .merge(driver_info::router())
         .merge(call::tenant_router())
-        .merge(sessions::router())
         .route_layer(middleware::from_fn(require_tenant_header))
         .route_layer(middleware::from_fn(with_device_dev_slot));
     let api = tenant.merge(call::public_router());
