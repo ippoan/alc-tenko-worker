@@ -56,6 +56,12 @@ W7a は読み取りと管理、W7b は点呼のセッション (`/api/tenko/sess
 | `/api/tenko-call/register` | POST | 乗務員の登録 (未登録の番号は 400 と文言) |
 | `/api/tenko-call/tenko` | POST | 点呼の位置の記録 (未登録の電話番号は 404) |
 
+ほかの worker から Service Binding で届くだけの口 (`/api` の外。auth-worker の振り分けには載せない。`X-Tenant-ID` が要る):
+
+| path | method | 中身 |
+|---|---|---|
+| `/internal/webhooks/fire` | POST | 点呼の節目の webhook を預かる (202。測定の口が段を進めたときに渡す。送るのは応答の後) |
+
 ## 開発
 
 `CLAUDE.md` のコマンドを参照。デプロイは `.github/workflows/deploy.yml` (main = staging、タグ `v*` = 本番)。

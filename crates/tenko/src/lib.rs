@@ -14,6 +14,7 @@
 //! - [`sessions`] — 点呼のセッション (一覧・1 件・開始と各段・安全判定・運行管理者の判定。W7b)
 //! - [`deliver`] — webhook の送信 (口は [`deliver::Outbox`] に積み、worker が応答の後に `ctx.wait_until` で送る。W7b)
 //! - [`overdue`] — 予定超過の確認 (worker の Cron Trigger が毎分呼ぶ。通知済みの印を先に付けた予定だけ送る。W7c)
+//! - [`fire`] — ほかの worker (測定の口) から点呼の節目の webhook を預かる口 (`/internal/webhooks/fire`。`/api` の外)
 //!
 //! **点呼の電話のアプリの口 (`/tenko-call/register`・`/tenko-call/tenko`) だけがテナントのヘッダーを要らない** (rust でも公開の口。
 //! テナントは点呼用の番号・電話番号から引く)。ほかは `X-Tenant-ID` を要る (auth-worker が付ける。無い・UUID でない → 401。
@@ -30,6 +31,7 @@ pub mod dashboard;
 pub mod deliver;
 pub mod driver_info;
 pub mod failures;
+pub mod fire;
 pub mod models;
 pub mod overdue;
 pub mod records;
@@ -89,7 +91,8 @@ pub async fn with_device_dev_slot(mut req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// 全部の口。rust と同じく `/api` の下 (auth-worker は `/api/...` のまま Service Binding に渡す)
+/// 全部の口。rust と同じく `/api` の下 (auth-worker は `/api/...` のまま Service Binding に渡す)。
+/// `/internal` の下はほかの worker から Service Binding で届くだけの口 ([`fire`])
 pub fn router() -> Router<AppState> {
     // 後に足した route_layer が外側: slot を置く → tenant と dev の印を読む → 口
     let tenant = records::router()
@@ -105,5 +108,9 @@ pub fn router() -> Router<AppState> {
         .route_layer(middleware::from_fn(require_tenant_header))
         .route_layer(middleware::from_fn(with_device_dev_slot));
     let api = tenant.merge(call::public_router());
-    Router::new().nest("/api", api)
+    // ほかの worker から Service Binding で届くだけの口 (auth-worker は `/api` の下しか渡さない)
+    let internal = fire::router()
+        .route_layer(middleware::from_fn(require_tenant_header))
+        .route_layer(middleware::from_fn(with_device_dev_slot));
+    Router::new().nest("/api", api).nest("/internal", internal)
 }

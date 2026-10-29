@@ -43,11 +43,15 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   fire-and-forget の spawn はしない。**dev端末の要求では積まない** (rust の `spawn_webhook` と同じ)。署名・再送 (1 秒・5 秒、3 回まで)・
   配信の記録は rust と同じ。外向きの HTTP (`src/webhook.rs`) はリダイレクトを追わず 7 秒で打ち切る (rust は 10 秒。
   3 回 × 7 秒 + 待ち 1 秒 + 5 秒 = 最長 27 秒で、`wait_until` の上限 = 応答の後 30 秒に収める)。
+- **webhook を預かる口** (`fire.rs`、`POST /internal/webhooks/fire`): 点呼の段を進める測定の口 (alc-measurements-worker) が
+  Service Binding で渡す。**`/api` の外に置く** (auth-worker は `/api/...` しか渡さないので外から届かない。振り分けの表にも載せない)。
+  種類は `EVENT_TYPES` の 4 つ、payload の `tenant_id` はヘッダーのテナントと一致 (でなければ 400)、dev端末の要求は積まない。
+  送るのは段の口と同じ控え (`outbox`) → 応答の後の `deliver_all`。
 - **予定超過の確認** (`overdue.rs`、W7c): `src/lib.rs` の `scheduled` (wrangler.toml の `[triggers]` = 毎分、**本番だけ**。triggers は env に
   継承されるので env.staging / env.local は `crons = []`、check-exposure.sh が検査) から `overdue::run`。送り先の設定の在るテナントを
   SECURITY DEFINER の関数で引き、**通知済みの印を先に付ける UPDATE** (`sql::CLAIM`) が返した予定だけを `deliver` で送る (2 つの実行が
   重なっても 1 回だけ。rust は読む → 印 → 送るで重なると 2 回送りえた)。超過は 60 分 (rust の既定。本番に env は無かった)。dev の軸は立てない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 13・admin_db 3・call_db 2・failures_db 1・overdue_db 3・records_db 3・schedules_db 2・sessions_db 13・views_db 3)
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 13・admin_db 3・call_db 2・failures_db 1・fire_db 2・overdue_db 3・records_db 3・schedules_db 2・sessions_db 13・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。
