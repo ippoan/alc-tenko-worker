@@ -51,11 +51,7 @@ path = "crates/tenko/src/driver_info.rs"
 [[files]]
 path = "crates/tenko/src/call.rs"
 
-# 点呼のセッション (開始と各段・安全判定・運行管理者の判定・記録。tests/sessions_db.rs が実 DB で通す。W7b)
-[[files]]
-path = "crates/tenko/src/sessions.rs"
-
-# webhook の送信 (署名・再送・配信の記録。tests/sessions_db.rs が偽物の HTTP で通す。W7b)
+# webhook の送信 (署名・再送・配信の記録。tests/deliver_db.rs が偽物の HTTP で通す。W7b)
 [[files]]
 path = "crates/tenko/src/deliver.rs"
 

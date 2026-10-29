@@ -1,7 +1,7 @@
 //! webhook の送信 (rust の `alc_core::webhook` の `fire_event_impl`・`deliver_webhook`・`ReqwestWebhookClient` と、
 //! alc-misc の repo/webhook.rs の `find_config`・`record_delivery` の写し)。
 //!
-//! 口 ([`crate::sessions`]) は送らずに [`Outbox`] に積む。worker は応答を返した後に [`deliver_all`] を
+//! 口 ([`crate::fire`]。測定の口から預かる点呼の節目) は送らずに [`Outbox`] に積む。worker は応答を返した後に [`deliver_all`] を
 //! `ctx.wait_until` で流す (fire-and-forget の spawn はしない。rust は `tokio::spawn` だった)。
 //!
 //! 送り方は rust と同じ:
