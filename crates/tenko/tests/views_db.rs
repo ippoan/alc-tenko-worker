@@ -41,9 +41,12 @@ async fn daily_health_orders_and_summarizes() {
         (fail, "fail", "2026-10-27T16:00:00Z"),
     ] {
         let s = session(t, emp, "自動点呼", "completed", false, None).await;
+        // 値は値の置き場の測定に入れ、セッションはそれを指す
         su.execute(
-            &format!("UPDATE alc_api.tenko_sessions SET completed_at = '{at}', temperature = 36.4, systolic = 118, safety_judgment = '{{\"status\": \"{status}\"}}' WHERE id = $1"),
-            &[&s],
+            &format!("WITH m AS (INSERT INTO alc_api.measurements (tenant_id, employee_id, status, result, alcohol_level, temperature, systolic) \
+                      VALUES ($2, $3, 'completed', 'normal', 0, 36.4, 118) RETURNING id) \
+                      UPDATE alc_api.tenko_sessions SET completed_at = '{at}', measurement_id = (SELECT id FROM m), safety_judgment = '{{\"status\": \"{status}\"}}' WHERE id = $1"),
+            &[&s, &t, &emp],
         )
         .await
         .unwrap();
@@ -78,6 +81,10 @@ async fn daily_health_orders_and_summarizes() {
             p["baseline_systolic"].clone()
         ),
         (json!("E1"), json!(36.4), json!(true), json!(120))
+    );
+    assert_eq!(
+        (p["alcohol_result"].clone(), p["alcohol_value"].clone()),
+        (json!("normal"), json!(0.0))
     );
     assert_eq!(v["employees"][1]["has_baseline"], false);
     assert_eq!(
@@ -121,7 +128,14 @@ async fn driver_fixture() -> (Uuid, Uuid) {
     .await
     .unwrap();
     let s = session(t, e, "自動点呼", "completed", false, None).await;
-    su.execute("UPDATE alc_api.tenko_sessions SET medical_measured_at = now(), temperature = 36.2, carins_vehicle_id = 'CAR1' WHERE id = $1", &[&s]).await.unwrap();
+    su.execute(
+        "WITH m AS (INSERT INTO alc_api.measurements (tenant_id, employee_id, status, medical_measured_at, temperature) \
+         VALUES ($2, $3, 'started', now(), 36.2) RETURNING id) \
+         UPDATE alc_api.tenko_sessions SET measurement_id = (SELECT id FROM m), carins_vehicle_id = 'CAR1' WHERE id = $1",
+        &[&s, &t, &e],
+    )
+    .await
+    .unwrap();
     record(
         t,
         s,

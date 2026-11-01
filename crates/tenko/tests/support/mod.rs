@@ -39,6 +39,7 @@ pub const TABLES: &[&str] = &[
     "employees",
     "employee_health_baselines",
     "tenko_sessions",
+    "measurements",
     "tenko_schedules",
     "tenko_records",
     "equipment_failures",
