@@ -69,19 +69,24 @@ pub struct DailyHealthResponse {
 
 impl TxOutput for DailyHealthRow {}
 
-/// $1 tenant_id / $2 日付 (JST の 1 日 = UTC の前日 15:00 から当日 15:00)
-pub const SQL: &str = "SELECT e.id, e.name, e.code, s.id, s.tenko_type, s.completed_at, s.temperature, s.systolic, \
-         s.diastolic, s.pulse, s.medical_measured_at, s.medical_manual_input, s.alcohol_result, s.alcohol_value, \
+/// $1 tenant_id / $2 日付 (JST の 1 日 = UTC の前日 15:00 から当日 15:00)。
+/// 値 (体温・血圧・アルコール) はセッションが指す測定 `m` から読む (値の置き場は測定。tenko-unify 段階 3)。
+/// アルコールの値は測定の結果が入るまで NULL (alc-measurements-worker のセッションの応答と同じ規則)
+pub const SQL: &str = "SELECT e.id, e.name, e.code, s.id, s.tenko_type, s.completed_at, m.temperature, m.systolic, \
+         m.diastolic, m.pulse, m.medical_measured_at, m.medical_manual_input, m.result, \
+         CASE WHEN m.result IS NOT NULL THEN m.alcohol_level END, \
          s.self_declaration, s.safety_judgment, (b.id IS NOT NULL), b.baseline_systolic, b.baseline_diastolic, \
          b.baseline_temperature, b.systolic_tolerance, b.diastolic_tolerance, b.temperature_tolerance \
      FROM alc_api.employees e \
      LEFT JOIN LATERAL ( \
-         SELECT * FROM alc_api.tenko_sessions ts \
+         SELECT ts.id, ts.tenko_type, ts.completed_at, ts.self_declaration, ts.safety_judgment, ts.measurement_id \
+         FROM alc_api.tenko_sessions ts \
          WHERE ts.employee_id = e.id AND ts.tenant_id = $1 AND ts.status = 'completed' \
            AND ts.completed_at >= ($2::date - INTERVAL '9 hours') \
            AND ts.completed_at < ($2::date + INTERVAL '15 hours') \
          ORDER BY ts.completed_at DESC LIMIT 1 \
      ) s ON true \
+     LEFT JOIN alc_api.measurements m ON m.tenant_id = $1 AND m.id = s.measurement_id \
      LEFT JOIN alc_api.employee_health_baselines b ON b.employee_id = e.id AND b.tenant_id = $1 \
      WHERE e.tenant_id = $1 AND e.deleted_at IS NULL \
      ORDER BY CASE \

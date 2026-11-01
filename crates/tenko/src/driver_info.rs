@@ -107,10 +107,13 @@ pub mod sql {
         " FROM alc_api.employee_health_baselines WHERE tenant_id = $1 AND employee_id = $2"
     );
 
-    /// 直近の測定 5 件 (点呼のセッションから)
-    pub const MEASUREMENTS: &str = "SELECT id, temperature, systolic, diastolic, pulse, medical_measured_at \
-         FROM alc_api.tenko_sessions WHERE tenant_id = $1 AND employee_id = $2 AND medical_measured_at IS NOT NULL \
-         ORDER BY medical_measured_at DESC LIMIT 5";
+    /// 直近の測定 5 件 (点呼のセッションが指す測定の体温・血圧。`id` はセッションの id)
+    pub const MEASUREMENTS: &str =
+        "SELECT s.id, m.temperature, m.systolic, m.diastolic, m.pulse, m.medical_measured_at \
+         FROM alc_api.tenko_sessions s \
+         JOIN alc_api.measurements m ON m.tenant_id = s.tenant_id AND m.id = s.measurement_id \
+         WHERE s.tenant_id = $1 AND s.employee_id = $2 AND m.medical_measured_at IS NOT NULL \
+         ORDER BY m.medical_measured_at DESC LIMIT 5";
 
     /// 労働時間 7 日
     pub const WORKING_HOURS: &str = "SELECT id, tenant_id, driver_id, work_date, start_time, total_work_minutes, \
