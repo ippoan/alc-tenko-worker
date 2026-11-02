@@ -15,6 +15,7 @@
 //! - [`call`] — 点呼の電話 (番号・乗務員の管理と、アプリからの登録・点呼の位置の記録)
 //! - [`deliver`] — webhook の送信 (口は [`deliver::Outbox`] に積み、worker が応答の後に `ctx.wait_until` で送る。W7b)
 //! - [`overdue`] — 予定超過の確認 (worker の Cron Trigger が毎分呼ぶ。通知済みの印を先に付けた予定だけ送る。W7c)
+//! - [`filing`] — 点呼の届出・自動点呼機器の認定申請に差し込む値 (テナント 1 行。admin だけ)
 //! - [`fire`] — ほかの worker (測定の口) から点呼の節目の webhook を預かる口 (`/internal/webhooks/fire`。`/api` の外)
 //!
 //! **点呼の電話のアプリの口 (`/tenko-call/register`・`/tenko-call/tenko`) だけがテナントのヘッダーを要らない** (rust でも公開の口。
@@ -32,6 +33,7 @@ pub mod dashboard;
 pub mod deliver;
 pub mod driver_info;
 pub mod failures;
+pub mod filing;
 pub mod fire;
 pub mod models;
 pub mod overdue;
@@ -103,6 +105,7 @@ pub fn router() -> Router<AppState> {
         .merge(dashboard::router())
         .merge(daily_health::router())
         .merge(driver_info::router())
+        .merge(filing::router())
         .merge(call::tenant_router())
         .route_layer(middleware::from_fn(require_tenant_header))
         .route_layer(middleware::from_fn(with_device_dev_slot));
