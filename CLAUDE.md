@@ -49,7 +49,7 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   継承されるので env.staging / env.local は `crons = []`、check-exposure.sh が検査) から `overdue::run`。送り先の設定の在るテナントを
   SECURITY DEFINER の関数で引き、**通知済みの印を先に付ける UPDATE** (`sql::CLAIM`) が返した予定だけを `deliver` で送る (2 つの実行が
   重なっても 1 回だけ。rust は読む → 印 → 送るで重なると 2 回送りえた)。超過は 60 分 (rust の既定。本番に env は無かった)。dev の軸は立てない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 9・admin_db 3・call_db 2・deliver_db 2・failures_db 1・fire_db 2・overdue_db 3・records_db 3・schedules_db 2・views_db 3)
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 11・admin_db 3・call_db 2・deliver_db 2・failures_db 1・filing_db 2・fire_db 2・overdue_db 3・records_db 3・schedules_db 2・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。

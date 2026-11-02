@@ -47,6 +47,7 @@ pub const TABLES: &[&str] = &[
     "webhook_deliveries",
     "tenko_call_numbers",
     "tenko_call_drivers",
+    "tenko_filing_settings",
 ];
 
 fn migrations_dir() -> std::path::PathBuf {

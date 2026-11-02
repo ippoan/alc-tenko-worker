@@ -27,6 +27,7 @@ ippoan/alc-measurements-worker へ移した。Refs ippoan/rust-alc-api#680)
 | `/api/tenko/webhooks` | GET・POST | webhook の設定の一覧・作成か上書き (送信はしない) |
 | `/api/tenko/webhooks/{id}` | GET・DELETE | 設定の 1 件・削除 |
 | `/api/tenko/webhooks/{id}/deliveries` | GET | 配信の記録 (新しい順に 100 件) |
+| `/api/tenko/filing-settings` | GET・PUT | 点呼の届出・認定申請に差し込む値 (テナント 1 行、admin だけ。行が無ければ既定値・PUT は全欄の置き換え) |
 | `/api/tenko/dashboard` | GET | ダッシュボード (件数と予定超過) |
 | `/api/tenko/daily-health-status` | GET | 日々の健康状態 (`?date=`、省略は JST の今日) |
 | `/api/tenko/driver-info/{employee_id}` | GET | 乗務員情報 (点呼で見せる項目) |
