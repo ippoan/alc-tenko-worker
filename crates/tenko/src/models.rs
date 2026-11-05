@@ -43,11 +43,13 @@ pub struct TenkoSchedule {
     pub overdue_notified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// 自動車登録番号又は車両番号 (予定の車両。migration 204)
+    pub vehicle_number: Option<String>,
 }
 
 pub const SCHEDULE_COLUMNS: &str =
     "id, tenant_id, employee_id, tenko_type, responsible_manager_name, scheduled_at, \
-     instruction, consumed, consumed_by_session_id, overdue_notified_at, created_at, updated_at";
+     instruction, consumed, consumed_by_session_id, overdue_notified_at, created_at, updated_at, vehicle_number";
 
 pub fn schedule(r: &Row) -> TenkoSchedule {
     TenkoSchedule {
@@ -63,6 +65,7 @@ pub fn schedule(r: &Row) -> TenkoSchedule {
         overdue_notified_at: r.get(9),
         created_at: r.get(10),
         updated_at: r.get(11),
+        vehicle_number: r.get(12),
     }
 }
 
@@ -336,6 +339,9 @@ pub struct CreateTenkoSchedule {
     pub responsible_manager_name: String,
     pub scheduled_at: DateTime<Utc>,
     pub instruction: Option<String>,
+    /// 省略は null
+    #[serde(default)]
+    pub vehicle_number: Option<String>,
 }
 
 #[cfg(test)]

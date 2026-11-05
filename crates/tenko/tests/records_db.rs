@@ -172,7 +172,7 @@ async fn csv_reads_judgment_and_rewrites_method() {
             ("daily_inspection", r#"'{"tires": "ng"}'"#),
             (
                 "record_data",
-                r#"'{"carins_cert_no": "C1", "carins_matched_by": "cert_no"}'"#,
+                r#"'{"carins_cert_no": "C1", "carins_matched_by": "cert_no", "vehicle_number": "品川 100 あ 12-34", "vehicle_number_source": "carins", "resumed_by_name": "再開 太郎", "cancel_reason": "体調不良", "alternative_measure": "別の乗務員に交代"}'"#,
             ),
             ("completed_at", "'2026-10-05T09:01:00Z'"),
         ],
@@ -191,7 +191,18 @@ async fn csv_reads_judgment_and_rewrites_method() {
     assert_eq!(&got.body[..3], &[0xEF, 0xBB, 0xBF]);
     let text = String::from_utf8(got.body[3..].to_vec()).unwrap();
     let mut rdr = csv::Reader::from_reader(text.as_bytes());
-    assert_eq!(rdr.headers().unwrap().len(), 39);
+    assert_eq!(rdr.headers().unwrap().len(), 44);
+    let h = rdr.headers().unwrap().clone();
+    assert_eq!(
+        h.iter().skip(39).collect::<Vec<_>>(),
+        [
+            "vehicle_number",
+            "vehicle_number_source",
+            "resumed_by_name",
+            "cancel_reason",
+            "alternative_measure"
+        ]
+    );
     let rows: Vec<csv::StringRecord> = rdr.records().map(|r| r.unwrap()).collect();
     assert_eq!(rows.len(), 2);
     // 新しい順。自動点呼は判定なし
@@ -209,6 +220,27 @@ async fn csv_reads_judgment_and_rewrites_method() {
     assert_eq!((&r[26], &r[27], &r[28]), ("ng", "顔色", "管理 花子"));
     assert_eq!(&r[29], "ng");
     assert_eq!((&r[35], &r[36], &r[38]), ("C1", "", "cert_no"));
+    assert_eq!(
+        (&r[39], &r[40], &r[41], &r[42], &r[43]),
+        (
+            "品川 100 あ 12-34",
+            "carins",
+            "再開 太郎",
+            "体調不良",
+            "別の乗務員に交代"
+        )
+    );
+    // record_data に無い新しい欄は空欄
+    assert_eq!(
+        (
+            &rows[0][39],
+            &rows[0][40],
+            &rows[0][41],
+            &rows[0][42],
+            &rows[0][43]
+        ),
+        ("", "", "", "", "")
+    );
 
     // 絞り込みは一覧と同じ
     let one = call_with(

@@ -220,6 +220,51 @@ async fn failures_crud_and_csv() {
     .await;
     assert_eq!(res.status, 200);
     assert!(res.json()["resolved_at"].is_string());
+    // 変更前の行が履歴に残る (古い順)。1 回目の変更前は未解決、2 回目の変更前は解決済み。ほかのテナントには見えない
+    let h_path = format!("{a_path}/history");
+    let h = call(&app, "GET", &h_path, Some(t), None).await;
+    assert_eq!(h.status, 200);
+    let h = h.json();
+    assert_eq!(h.as_array().unwrap().len(), 1);
+    assert!(h[0]["changed_at"].is_string());
+    assert_eq!(h[0]["old_row"]["description"], "落ちた");
+    assert_eq!(h[0]["old_row"]["resolved_at"], json!(null));
+    assert_eq!(
+        call(
+            &app,
+            "PUT",
+            &a_path,
+            Some(t),
+            Some(json!({ "resolution_notes": "再起動 2" }))
+        )
+        .await
+        .status,
+        200
+    );
+    let h = call(&app, "GET", &h_path, Some(t), None).await.json();
+    assert_eq!(h.as_array().unwrap().len(), 2);
+    assert_eq!(h[1]["old_row"]["resolution_notes"], "再起動");
+    assert!(h[0]["changed_at"].as_str() <= h[1]["changed_at"].as_str());
+    assert_eq!(
+        call(&app, "GET", &h_path, Some(other), None).await.json(),
+        json!([])
+    );
+    // 履歴の無い故障は空の配列
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            &format!(
+                "/api/tenko/equipment-failures/{}/history",
+                uuid::Uuid::new_v4()
+            ),
+            Some(t),
+            None
+        )
+        .await
+        .json(),
+        json!([])
+    );
     assert_eq!(
         call(&app, "PUT", &a_path, Some(other), Some(json!({})))
             .await
@@ -269,7 +314,7 @@ async fn failures_crud_and_csv() {
     assert_eq!(lines[0], "id,failure_type,description,affected_device,detected_at,detected_by,resolved_at,resolution_notes,session_id");
     assert_eq!(lines.len(), 2);
     assert!(lines[1].contains(",kiosk_offline,落ちた,kiosk-1,2026-10-01T00:00:00+00:00,管理,"));
-    assert!(lines[1].ends_with(",再起動,"));
+    assert!(lines[1].ends_with(",再起動 2,"));
 
     // dev の軸
     assert_eq!(

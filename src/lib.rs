@@ -20,7 +20,7 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Response, StatusCode};
 use futures_util::lock::Mutex;
 use tenko::deliver::{deliver_all, Outbox, Sender};
-use tenko::overdue::{self, DEFAULT_OVERDUE_MINUTES};
+use tenko::overdue;
 use tenko::{router, AppState, LogSink};
 use tower_service::Service;
 use worker::{
@@ -111,12 +111,5 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         sleeper: Arc::new(webhook::WorkerSleeper),
     };
     let now = worker::Date::now().as_millis() as i64;
-    overdue::run(
-        Arc::new(Mutex::new(pg)),
-        sender,
-        log_sink(),
-        now,
-        DEFAULT_OVERDUE_MINUTES,
-    )
-    .await;
+    overdue::run(Arc::new(Mutex::new(pg)), sender, log_sink(), now).await;
 }

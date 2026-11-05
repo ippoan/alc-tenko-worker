@@ -4,11 +4,13 @@
 //! - `GET /tenko/equipment-failures` (`?failure_type=&resolved=&session_id=&date_from=&date_to=&page=&per_page=`) — 一覧 (検出の新しい順)
 //! - `GET /tenko/equipment-failures/csv` — 期間 (`date_from`・`date_to`) だけで絞った全件の CSV (BOM 付き)
 //! - `GET /tenko/equipment-failures/{id}` — 1 件。`PUT` — 解決の記録 (解決の時刻は今)。無ければ 404
+//! - `GET /tenko/equipment-failures/{id}/history` — 変更前の行の履歴 `[{changed_at, old_row}]` (古い順。migration 204 の
+//!   trigger が解決の記録のたびに残す。故障も履歴も削除・履歴の更新はできない)。履歴が無ければ空の配列
 //!
 //! rust との違い: 絞り込みは文を組み立てず `($n IS NULL OR ...)` の 1 文にした。
 
 use alc_core_wasm::{DeviceDevSlot, TenantId};
-use alc_worker_db::PgClient;
+use alc_worker_db::{PgClient, TxOutput};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
@@ -64,6 +66,15 @@ pub struct FailureFilter {
     pub page: Option<i64>,
     pub per_page: Option<i64>,
 }
+
+/// 変更前の行 1 件 (`equipment_failure_history`。`old_row` は変更前の `equipment_failures` の行を JSON にしたもの)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FailureHistory {
+    pub changed_at: DateTime<Utc>,
+    pub old_row: serde_json::Value,
+}
+
+impl TxOutput for FailureHistory {}
 
 /// rust の `EquipmentFailuresResponse`
 #[derive(Debug, Serialize)]
@@ -122,6 +133,10 @@ pub mod sql {
         FAILURE_COLUMNS,
         " FROM alc_api.equipment_failures WHERE id = $1 AND tenant_id = $2"
     );
+
+    /// 変更前の履歴 (古い順)。$1 tenant_id / $2 failure_id
+    pub const HISTORY: &str = "SELECT changed_at, old_row FROM alc_api.equipment_failure_history \
+         WHERE tenant_id = $1 AND failure_id = $2 ORDER BY changed_at, id";
 
     /// 解決の記録。$1 id / $2 tenant_id / $3 resolution_notes
     pub const RESOLVE: &str = concatcp!(
@@ -255,6 +270,30 @@ pub async fn resolve(
     .await
 }
 
+pub async fn history(
+    pg: &mut PgClient,
+    tenant_id: Uuid,
+    dev: bool,
+    id: Uuid,
+) -> Result<Vec<FailureHistory>, Error> {
+    pg.tenant_tx(tenant_id, move |tx| {
+        Box::pin(async move {
+            set_device_dev(tx, dev).await?;
+            let rows = tx
+                .query_typed(sql::HISTORY, &[(&tenant_id, Type::UUID), (&id, Type::UUID)])
+                .await?;
+            Ok(rows
+                .iter()
+                .map(|r| FailureHistory {
+                    changed_at: r.get(0),
+                    old_row: r.get(1),
+                })
+                .collect())
+        })
+    })
+    .await
+}
+
 /// CSV の見出し (rust と同じ 9 列)
 pub const CSV_HEADER: [&str; 9] = [
     "id",
@@ -299,6 +338,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/tenko/equipment-failures/{id}",
             get(get_handler).put(resolve_handler),
+        )
+        .route(
+            "/tenko/equipment-failures/{id}/history",
+            get(history_handler),
         )
 }
 
@@ -386,4 +429,17 @@ async fn resolve_handler(
         .map_err(|e| state.db_fail("failure resolve", &e))?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn history_handler(
+    State(state): State<AppState>,
+    Extension(TenantId(tenant_id)): Extension<TenantId>,
+    Extension(dev): Extension<DeviceDevSlot>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<FailureHistory>>, StatusCode> {
+    let mut pg = state.pg.lock().await;
+    history(&mut pg, tenant_id, dev.get(), id)
+        .await
+        .map(Json)
+        .map_err(|e| state.db_fail("failure history", &e))
 }

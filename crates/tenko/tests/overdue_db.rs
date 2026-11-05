@@ -10,7 +10,7 @@ use futures_util::lock::Mutex;
 use serde_json::{json, Value};
 use support::{admin, broken_client, client_as, employee, rt_client, tenant, READ_ONLY_ROLE};
 use tenko::deliver::{HttpResult, Sender, Sleeper, WebhookHttp};
-use tenko::overdue::{run, DEFAULT_OVERDUE_MINUTES};
+use tenko::overdue::run;
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -179,14 +179,7 @@ async fn overdue_schedules_are_claimed_and_sent_once() {
     let http = Arc::new(FakeHttp::default());
     let logs: Logs = Arc::default();
     let now = now_ms();
-    run(
-        pg.clone(),
-        sender(http.clone()),
-        sink(&logs),
-        now,
-        DEFAULT_OVERDUE_MINUTES,
-    )
-    .await;
+    run(pg.clone(), sender(http.clone()), sink(&logs), now).await;
 
     let sent = http.sent_for(t);
     assert_eq!(sent.len(), 1);
@@ -198,6 +191,9 @@ async fn overdue_schedules_are_claimed_and_sent_once() {
     assert_eq!(p["data"]["employee_name"], "超過 一郎");
     assert_eq!(p["data"]["responsible_manager_name"], "運行 管理者");
     assert_eq!(p["data"]["tenko_type"], "post_operation");
+    // 未消費の予定は session_id・session_status が null
+    assert_eq!(p["data"]["session_id"], json!(null));
+    assert_eq!(p["data"]["session_status"], json!(null));
     let minutes = p["data"]["minutes_overdue"].as_i64().unwrap();
     assert!((119..=121).contains(&minutes), "{minutes}");
     assert!(notified(late).await);
@@ -207,14 +203,7 @@ async fn overdue_schedules_are_claimed_and_sent_once() {
     assert!(notified(already).await);
     assert_eq!(deliveries(cfg).await, vec![(1, true)]);
 
-    run(
-        pg,
-        sender(http.clone()),
-        sink(&logs),
-        now,
-        DEFAULT_OVERDUE_MINUTES,
-    )
-    .await;
+    run(pg, sender(http.clone()), sink(&logs), now).await;
     assert_eq!(http.sent_for(t).len(), 1);
     assert!(logs.lock().unwrap().is_empty());
 }
@@ -236,28 +225,14 @@ async fn failed_delivery_is_recorded_and_not_resent() {
         Ok((503, "down".into())),
     ];
     let logs: Logs = Arc::default();
-    run(
-        pg.clone(),
-        sender(http.clone()),
-        sink(&logs),
-        now_ms(),
-        DEFAULT_OVERDUE_MINUTES,
-    )
-    .await;
+    run(pg.clone(), sender(http.clone()), sink(&logs), now_ms()).await;
     assert_eq!(http.sent_for(t).len(), 3);
     assert_eq!(
         deliveries(cfg).await,
         vec![(1, false), (2, false), (3, false)]
     );
     assert!(notified(late).await);
-    run(
-        pg,
-        sender(http.clone()),
-        sink(&logs),
-        now_ms(),
-        DEFAULT_OVERDUE_MINUTES,
-    )
-    .await;
+    run(pg, sender(http.clone()), sink(&logs), now_ms()).await;
     assert_eq!(http.sent_for(t).len(), 3);
 }
 
@@ -273,14 +248,7 @@ async fn db_failures_are_logged() {
     let logs: Logs = Arc::default();
     let http = Arc::new(FakeHttp::default());
     let broken = Arc::new(Mutex::new(broken_client().await));
-    run(
-        broken,
-        sender(http.clone()),
-        sink(&logs),
-        now_ms(),
-        DEFAULT_OVERDUE_MINUTES,
-    )
-    .await;
+    run(broken, sender(http.clone()), sink(&logs), now_ms()).await;
     assert!(logs.lock().unwrap()[0].starts_with("tenko: overdue configs failed: db ("));
 
     // 読み取り専用のロール: 関数は呼べる (このテストで付ける) が、予定を更新できない
@@ -292,18 +260,118 @@ async fn db_failures_are_logged() {
         .await
         .unwrap();
     let ro = Arc::new(Mutex::new(client_as(READ_ONLY_ROLE).await));
-    run(
-        ro,
-        sender(http.clone()),
-        sink(&logs),
-        now_ms(),
-        DEFAULT_OVERDUE_MINUTES,
-    )
-    .await;
+    run(ro, sender(http.clone()), sink(&logs), now_ms()).await;
     let logs = logs.lock().unwrap().clone();
     assert!(logs
         .iter()
         .any(|l| l.starts_with("tenko: overdue claim failed: db (")));
     assert!(http.sent.lock().unwrap().is_empty());
     assert!(!notified(late).await);
+}
+
+/// 消費したセッションを持つ予定 (`session_status` が None なら未消費)。予定の時刻は `ago` 前
+async fn schedule_with_session(t: Uuid, emp: Uuid, ago: &str, status: &str) -> (Uuid, Uuid) {
+    let session = support::session(t, emp, "自動点呼", status, false, None).await;
+    let id = schedule(t, emp, ago, true, false, false).await;
+    admin()
+        .await
+        .execute(
+            "UPDATE alc_api.tenko_schedules SET consumed_by_session_id = $2 WHERE id = $1",
+            &[&id, &session],
+        )
+        .await
+        .unwrap();
+    (id, session)
+}
+
+/// 分数はテナントの設定 (行が無ければ 60 分)。超過とするのは「時刻 + 分数 を過ぎても点呼が完了していない」予定:
+/// 未消費、または消費したセッションが completed・cancelled 以外 (中断・判定待ち・途中)。payload にそのセッションを載せる
+#[tokio::test]
+async fn minutes_are_per_tenant_and_unfinished_sessions_count() {
+    let _serial = serial().lock().await;
+    let short = tenant().await;
+    let long = tenant().await;
+    let default = tenant().await;
+    for t in [short, long, default] {
+        config(t, true).await;
+    }
+    let su = admin().await;
+    su.execute(
+        "INSERT INTO alc_api.tenko_settings (tenant_id, overdue_minutes) VALUES ($1, 10), ($2, 180)",
+        &[&short, &long],
+    )
+    .await
+    .unwrap();
+
+    // 10 分の設定: 20 分前は超過、5 分前は超過でない
+    let e1 = employee(short, "短い 一郎").await;
+    let short_late = schedule(short, e1, "20 minutes", false, false, false).await;
+    let short_soon = schedule(short, e1, "5 minutes", false, false, false).await;
+    // 180 分の設定: 2 時間前 (60 分の既定なら超過) は超過でない
+    let e2 = employee(long, "長い 二郎").await;
+    let long_wait = schedule(long, e2, "2 hours", false, false, false).await;
+    let long_late = schedule(long, e2, "4 hours", false, false, false).await;
+    // 設定の行が無い: 既定の 60 分
+    let e3 = employee(default, "既定 三郎").await;
+    let default_late = schedule(default, e3, "90 minutes", false, false, false).await;
+    let default_soon = schedule(default, e3, "50 minutes", false, false, false).await;
+    // 消費済み: 完了・中止は超過でない。中断・判定待ち・途中は超過
+    let (done, _) = schedule_with_session(default, e3, "3 hours", "completed").await;
+    let (cancelled, _) = schedule_with_session(default, e3, "3 hours", "cancelled").await;
+    let (interrupted, s_int) = schedule_with_session(default, e3, "3 hours", "interrupted").await;
+    let (pending, _) = schedule_with_session(default, e3, "3 hours", "judgment_pending").await;
+    let (running, _) = schedule_with_session(default, e3, "3 hours", "identity_verified").await;
+    // 消費済みで 60 分を過ぎていても、まだ分数の内なら送らない
+    let (young, _) = schedule_with_session(default, e3, "20 minutes", "interrupted").await;
+    // 消費済みだがセッションの印が無い予定は数えない
+    let orphan = schedule(default, e3, "3 hours", true, false, false).await;
+
+    let pg = Arc::new(Mutex::new(rt_client().await));
+    let http = Arc::new(FakeHttp::default());
+    let logs: Logs = Arc::default();
+    run(pg, sender(http.clone()), sink(&logs), now_ms()).await;
+
+    for id in [
+        short_late,
+        long_late,
+        default_late,
+        interrupted,
+        pending,
+        running,
+    ] {
+        assert!(notified(id).await, "{id}");
+    }
+    for id in [
+        short_soon,
+        long_wait,
+        default_soon,
+        done,
+        cancelled,
+        young,
+        orphan,
+    ] {
+        assert!(!notified(id).await, "{id}");
+    }
+    assert_eq!(http.sent_for(short).len(), 1);
+    assert_eq!(http.sent_for(long).len(), 1);
+    assert_eq!(http.sent_for(default).len(), 4);
+
+    // 消費済みの予定の payload には、そのセッションの id と status が載る
+    let sent = http.sent_for(default);
+    let p = sent
+        .iter()
+        .find(|p| p["data"]["schedule_id"] == json!(interrupted))
+        .unwrap();
+    assert_eq!(p["data"]["session_id"], json!(s_int));
+    assert_eq!(p["data"]["session_status"], "interrupted");
+    let statuses: Vec<_> = sent
+        .iter()
+        .filter(|p| p["data"]["schedule_id"] != json!(default_late))
+        .map(|p| p["data"]["session_status"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(statuses.len(), 3);
+    for s in ["interrupted", "judgment_pending", "identity_verified"] {
+        assert!(statuses.iter().any(|x| x == s), "{s}");
+    }
+    assert!(logs.lock().unwrap().is_empty());
 }

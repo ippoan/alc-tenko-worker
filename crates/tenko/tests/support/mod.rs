@@ -43,6 +43,8 @@ pub const TABLES: &[&str] = &[
     "tenko_schedules",
     "tenko_records",
     "equipment_failures",
+    "equipment_failure_history",
+    "tenko_settings",
     "webhook_configs",
     "webhook_deliveries",
     "tenko_call_numbers",

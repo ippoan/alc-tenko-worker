@@ -6,6 +6,7 @@
 //!
 //! - [`records`] — 点呼の記録の一覧・CSV
 //! - [`schedules`] — 点呼の予定 (一覧・作成・一括・1 件・更新・削除・乗務員の未消費の予定)
+//! - [`settings`] — 点呼の設定 (予定超過とする分数。テナントに 1 行、行が無ければ 60 分)
 //! - [`baselines`] — 健康の基準値
 //! - [`failures`] — 機器故障 (一覧・作成・1 件・解決・CSV)
 //! - [`webhooks`] — webhook の設定と配信の記録 (送信はしない)
@@ -39,6 +40,7 @@ pub mod models;
 pub mod overdue;
 pub mod records;
 pub mod schedules;
+pub mod settings;
 pub mod webhooks;
 
 use std::sync::Arc;
@@ -99,6 +101,7 @@ pub fn router() -> Router<AppState> {
     // 後に足した route_layer が外側: slot を置く → tenant と dev の印を読む → 口
     let tenant = records::router()
         .merge(schedules::router())
+        .merge(settings::router())
         .merge(baselines::router())
         .merge(failures::router())
         .merge(webhooks::router())
