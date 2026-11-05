@@ -23,6 +23,10 @@ path = "crates/tenko/src/records.rs"
 [[files]]
 path = "crates/tenko/src/schedules.rs"
 
+# 点呼の設定 (tests/schedules_db.rs)
+[[files]]
+path = "crates/tenko/src/settings.rs"
+
 # ダッシュボード (tests/schedules_db.rs)
 [[files]]
 path = "crates/tenko/src/dashboard.rs"

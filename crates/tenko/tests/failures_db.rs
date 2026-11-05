@@ -113,6 +113,19 @@ async fn db_failures_are_500_with_fixed_logs() {
             "failure resolve",
         ),
         (
+            "GET",
+            format!("/api/tenko/equipment-failures/{id}/history"),
+            None,
+            "failure history",
+        ),
+        ("GET", "/api/tenko/settings".into(), None, "settings get"),
+        (
+            "PUT",
+            "/api/tenko/settings".into(),
+            Some(json!({ "overdue_minutes": 30 })),
+            "settings put",
+        ),
+        (
             "POST",
             "/api/tenko/webhooks".into(),
             Some(json!({ "event_type": "tenko_completed", "url": "https://example.com/h" })),

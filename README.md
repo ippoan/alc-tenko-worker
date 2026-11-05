@@ -24,6 +24,8 @@ ippoan/alc-measurements-worker へ移した。Refs ippoan/rust-alc-api#680)
 | `/api/tenko/equipment-failures` | GET・POST | 機器故障の一覧・記録 |
 | `/api/tenko/equipment-failures/csv` | GET | 機器故障の CSV |
 | `/api/tenko/equipment-failures/{id}` | GET・PUT | 1 件・解決の記録 |
+| `/api/tenko/equipment-failures/{id}/history` | GET | 変更前の行の履歴 `[{changed_at, old_row}]` (古い順) |
+| `/api/tenko/settings` | GET・PUT | 点呼の設定 `{overdue_minutes}` (予定超過の分数 1〜1440。行が無ければ 60・PUT は upsert) |
 | `/api/tenko/webhooks` | GET・POST | webhook の設定の一覧・作成か上書き (送信はしない) |
 | `/api/tenko/webhooks/{id}` | GET・DELETE | 設定の 1 件・削除 |
 | `/api/tenko/webhooks/{id}/deliveries` | GET | 配信の記録 (新しい順に 100 件) |

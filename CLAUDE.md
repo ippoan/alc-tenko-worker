@@ -32,7 +32,7 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   SELECT が USING (true) の番号・乗務員の表を読む文だけで、nil のテナントの transaction で流す。書き込みは引いたテナントで。
 - SQL に tenant_id を明示する (rust は RLS 任せの文があった)。絞り込みは文を組み立てず `($n IS NULL OR ...)` の 1 文。
 - 乗務員情報の任意の項目 (労働時間・指導・携行品・記録・点検・故障・整備) は項目ごとに別の transaction で読み、失敗は空の配列 (rust と同じ)。
-- 予定超過の分数は rust の既定値の定数 (`dashboard::OVERDUE_MINUTES` = 60。本番の Cloud Run は `TENKO_OVERDUE_MINUTES` を設定していない)。
+- 予定超過の分数: 予定超過の確認 (`overdue.rs`) はテナントの `tenko_settings.overdue_minutes` (行が無ければ 60。`GET`・`PUT /tenko/settings`)。ダッシュボードの超過 (`dashboard::OVERDUE_MINUTES` = 60) は定数のまま。
 - wasm32 で chrono の `Utc::now()` を使わない (時計は `AppState.clock`。Workers は `Date.now()`)。
 - DB は `PgClient::tenant_tx` + `query_typed` 系だけ。名前付き prepared statement 禁止。Row を tx の外へ出さない。
 - **点呼のセッション** (`/api/tenko/sessions*`) は持たない: 点呼の記録の入口の一本化で ippoan/alc-measurements-worker へ移した
@@ -48,8 +48,8 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
 - **予定超過の確認** (`overdue.rs`、W7c): `src/lib.rs` の `scheduled` (wrangler.toml の `[triggers]` = 毎分、**本番だけ**。triggers は env に
   継承されるので env.staging / env.local は `crons = []`、check-exposure.sh が検査) から `overdue::run`。送り先の設定の在るテナントを
   SECURITY DEFINER の関数で引き、**通知済みの印を先に付ける UPDATE** (`sql::CLAIM`) が返した予定だけを `deliver` で送る (2 つの実行が
-  重なっても 1 回だけ。rust は読む → 印 → 送るで重なると 2 回送りえた)。超過は 60 分 (rust の既定。本番に env は無かった)。dev の軸は立てない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 11・admin_db 3・call_db 2・deliver_db 2・failures_db 1・filing_db 2・fire_db 2・overdue_db 3・records_db 3・schedules_db 2・views_db 3)
+  重なっても 1 回だけ。rust は読む → 印 → 送るで重なると 2 回送りえた)。超過 = 時刻 + テナントの分数 を過ぎても点呼が完了していない (未消費、または消費したセッションが completed・cancelled 以外)。分数は CLAIM の中で引く。dev の軸は立てない。
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 11・admin_db 3・call_db 2・deliver_db 2・failures_db 1・filing_db 2・fire_db 2・overdue_db 4・records_db 3・schedules_db 3・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。

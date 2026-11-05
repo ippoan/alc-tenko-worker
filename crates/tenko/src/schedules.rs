@@ -36,6 +36,9 @@ pub struct UpdateSchedule {
     pub responsible_manager_name: Option<String>,
     pub scheduled_at: Option<DateTime<Utc>>,
     pub instruction: Option<String>,
+    /// null・省略は変えない
+    #[serde(default)]
+    pub vehicle_number: Option<String>,
 }
 
 /// rust の `TenkoScheduleFilter`
@@ -62,10 +65,10 @@ pub struct SchedulesResponse {
 pub mod sql {
     use super::*;
 
-    /// 1 件作る。$1 tenant_id / $2 employee_id / $3 tenko_type / $4 responsible_manager_name / $5 scheduled_at / $6 instruction
+    /// 1 件作る。$1 tenant_id / $2 employee_id / $3 tenko_type / $4 responsible_manager_name / $5 scheduled_at / $6 instruction / $7 vehicle_number
     pub const INSERT: &str = concatcp!(
-        "INSERT INTO alc_api.tenko_schedules (tenant_id, employee_id, tenko_type, responsible_manager_name, scheduled_at, instruction) \
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING ",
+        "INSERT INTO alc_api.tenko_schedules (tenant_id, employee_id, tenko_type, responsible_manager_name, scheduled_at, instruction, vehicle_number) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ",
         SCHEDULE_COLUMNS
     );
 
@@ -95,12 +98,13 @@ pub mod sql {
         " FROM alc_api.tenko_schedules WHERE id = $1 AND tenant_id = $2"
     );
 
-    /// 更新 (未消費だけ。null の欄は変えない)。$1 responsible_manager_name / $2 scheduled_at / $3 instruction / $4 id / $5 tenant_id
+    /// 更新 (未消費だけ。null の欄は変えない)。$1 responsible_manager_name / $2 scheduled_at / $3 instruction / $4 id / $5 tenant_id / $6 vehicle_number
     pub const UPDATE: &str = concatcp!(
         "UPDATE alc_api.tenko_schedules SET \
              responsible_manager_name = COALESCE($1, responsible_manager_name), \
              scheduled_at = COALESCE($2, scheduled_at), \
              instruction = COALESCE($3, instruction), \
+             vehicle_number = COALESCE($6, vehicle_number), \
              updated_at = NOW() \
          WHERE id = $4 AND tenant_id = $5 AND consumed = FALSE RETURNING ",
         SCHEDULE_COLUMNS
@@ -140,13 +144,14 @@ pub async fn create(
             set_device_dev(tx, dev).await?;
             let mut out = Vec::with_capacity(inputs.len());
             for s in &inputs {
-                let args: [Arg; 6] = [
+                let args: [Arg; 7] = [
                     (&tenant_id, Type::UUID),
                     (&s.employee_id, Type::UUID),
                     (&s.tenko_type, Type::TEXT),
                     (&s.responsible_manager_name, Type::TEXT),
                     (&s.scheduled_at, Type::TIMESTAMPTZ),
                     (&s.instruction, Type::TEXT),
+                    (&s.vehicle_number, Type::TEXT),
                 ];
                 out.push(schedule(&tx.query_typed_one(sql::INSERT, &args).await?));
             }
@@ -215,12 +220,13 @@ pub async fn update(
     pg.tenant_tx(tenant_id, move |tx| {
         Box::pin(async move {
             set_device_dev(tx, dev).await?;
-            let args: [Arg; 5] = [
+            let args: [Arg; 6] = [
                 (&input.responsible_manager_name, Type::TEXT),
                 (&input.scheduled_at, Type::TIMESTAMPTZ),
                 (&input.instruction, Type::TEXT),
                 (&id, Type::UUID),
                 (&tenant_id, Type::UUID),
+                (&input.vehicle_number, Type::TEXT),
             ];
             let row = tx.query_typed_opt(sql::UPDATE, &args).await?;
             Ok(row.as_ref().map(schedule))
@@ -403,6 +409,7 @@ mod tests {
             responsible_manager_name: "m".into(),
             scheduled_at: DateTime::<Utc>::UNIX_EPOCH,
             instruction: instruction.map(str::to_owned),
+            vehicle_number: None,
         }
     }
 

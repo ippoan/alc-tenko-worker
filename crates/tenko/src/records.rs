@@ -222,8 +222,8 @@ fn time(v: Option<DateTime<Utc>>) -> String {
     v.map_or(String::new(), |t| t.to_rfc3339())
 }
 
-/// CSV の見出し (rust と同じ 39 列)
-pub const CSV_HEADER: [&str; 39] = [
+/// CSV の見出し (rust の 39 列 + 自己点検表の 5 列。後ろの 9 列は record_data から読む)
+pub const CSV_HEADER: [&str; 44] = [
     "record_id",
     "employee_name",
     "tenko_type",
@@ -263,6 +263,11 @@ pub const CSV_HEADER: [&str; 39] = [
     "carins_vehicle_id",
     "carins_expires_on",
     "carins_matched_by",
+    "vehicle_number",
+    "vehicle_number_source",
+    "resumed_by_name",
+    "cancel_reason",
+    "alternative_measure",
 ];
 
 /// 記録 1 件の CSV の行
@@ -309,6 +314,11 @@ pub fn csv_row(r: &TenkoRecord) -> Vec<String> {
         record_data_str(&r.record_data, "carins_vehicle_id"),
         record_data_str(&r.record_data, "carins_expires_on"),
         record_data_str(&r.record_data, "carins_matched_by"),
+        record_data_str(&r.record_data, "vehicle_number"),
+        record_data_str(&r.record_data, "vehicle_number_source"),
+        record_data_str(&r.record_data, "resumed_by_name"),
+        record_data_str(&r.record_data, "cancel_reason"),
+        record_data_str(&r.record_data, "alternative_measure"),
     ]
 }
 
