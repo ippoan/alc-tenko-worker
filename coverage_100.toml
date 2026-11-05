@@ -70,3 +70,7 @@ path = "crates/tenko/src/fire.rs"
 # 点呼の届出・認定申請に差し込む値 (テナント 1 行。tests/filing_db.rs)
 [[files]]
 path = "crates/tenko/src/filing.rs"
+
+# 点呼の営業所と、運行管理者・車両の所属 (tests/offices_db.rs)
+[[files]]
+path = "crates/tenko/src/offices.rs"
