@@ -285,13 +285,13 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/tenko/filing-settings", get(get_handler).put(put_handler))
 }
 
-fn is_admin(auth_user: &Option<Extension<AuthUser>>) -> bool {
+pub(crate) fn is_admin(auth_user: &Option<Extension<AuthUser>>) -> bool {
     auth_user
         .as_ref()
         .is_some_and(|Extension(u)| u.role == "admin")
 }
 
-fn error(status: StatusCode, word: &'static str) -> Response {
+pub(crate) fn error(status: StatusCode, word: &'static str) -> Response {
     (status, Json(json!({ "error": word }))).into_response()
 }
 
