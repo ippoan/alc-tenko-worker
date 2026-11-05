@@ -193,6 +193,14 @@ fn judgment(v: Option<&serde_json::Value>) -> (String, String) {
     (status, items)
 }
 
+/// 安全の判定の基準値との差 (`medical_diffs` の 1 つ。測っていない・基準値が無い・判定が無ければ空欄)
+fn diff(v: Option<&serde_json::Value>, key: &str) -> String {
+    v.and_then(|v| v.get("medical_diffs"))
+        .and_then(|d| d.get(key))
+        .filter(|n| n.is_number())
+        .map_or(String::new(), |n| n.to_string())
+}
+
 /// 日常点検の結果 (1 つでも ng なら ng。無ければ空欄)
 fn inspection(v: Option<&serde_json::Value>) -> String {
     const ITEMS: [&str; 8] = [
@@ -222,8 +230,9 @@ fn time(v: Option<DateTime<Utc>>) -> String {
     v.map_or(String::new(), |t| t.to_rfc3339())
 }
 
-/// CSV の見出し (rust の 39 列 + 自己点検表の 5 列。後ろの 9 列は record_data から読む)
-pub const CSV_HEADER: [&str; 44] = [
+/// CSV の見出し (rust の 39 列 + 自己点検表の 8 列。record_data から読む 9 列のあとに、安全の判定の基準値との差 3 列
+/// (業務前 二十三 ヌ。`safety_judgment.medical_diffs`))
+pub const CSV_HEADER: [&str; 47] = [
     "record_id",
     "employee_name",
     "tenko_type",
@@ -268,6 +277,9 @@ pub const CSV_HEADER: [&str; 44] = [
     "resumed_by_name",
     "cancel_reason",
     "alternative_measure",
+    "temperature_diff",
+    "systolic_diff",
+    "diastolic_diff",
 ];
 
 /// 記録 1 件の CSV の行
@@ -319,6 +331,9 @@ pub fn csv_row(r: &TenkoRecord) -> Vec<String> {
         record_data_str(&r.record_data, "resumed_by_name"),
         record_data_str(&r.record_data, "cancel_reason"),
         record_data_str(&r.record_data, "alternative_measure"),
+        diff(r.safety_judgment.as_ref(), "temperature_diff"),
+        diff(r.safety_judgment.as_ref(), "systolic_diff"),
+        diff(r.safety_judgment.as_ref(), "diastolic_diff"),
     ]
 }
 

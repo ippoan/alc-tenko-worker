@@ -167,7 +167,7 @@ async fn csv_reads_judgment_and_rewrites_method() {
             ),
             (
                 "safety_judgment",
-                r#"'{"status": "fail", "failed_items": ["bp", "temp"]}'"#,
+                r#"'{"status": "fail", "failed_items": ["bp", "temp"], "medical_diffs": {"systolic_diff": 15, "diastolic_diff": -3, "temperature_diff": 0.6}}'"#,
             ),
             ("daily_inspection", r#"'{"tires": "ng"}'"#),
             (
@@ -191,10 +191,14 @@ async fn csv_reads_judgment_and_rewrites_method() {
     assert_eq!(&got.body[..3], &[0xEF, 0xBB, 0xBF]);
     let text = String::from_utf8(got.body[3..].to_vec()).unwrap();
     let mut rdr = csv::Reader::from_reader(text.as_bytes());
-    assert_eq!(rdr.headers().unwrap().len(), 44);
+    assert_eq!(rdr.headers().unwrap().len(), 47);
+    assert_eq!(
+        rdr.headers().unwrap().iter().skip(44).collect::<Vec<_>>(),
+        ["temperature_diff", "systolic_diff", "diastolic_diff"]
+    );
     let h = rdr.headers().unwrap().clone();
     assert_eq!(
-        h.iter().skip(39).collect::<Vec<_>>(),
+        h.iter().skip(39).take(5).collect::<Vec<_>>(),
         [
             "vehicle_number",
             "vehicle_number_source",
@@ -219,6 +223,9 @@ async fn csv_reads_judgment_and_rewrites_method() {
     assert_eq!((&r[24], &r[25]), ("fail", "bp;temp"));
     assert_eq!((&r[26], &r[27], &r[28]), ("ng", "顔色", "管理 花子"));
     assert_eq!(&r[29], "ng");
+    // 基準値との差 (業務前 二十三 ヌ)。判定の無い記録は空欄
+    assert_eq!((&r[44], &r[45], &r[46]), ("0.6", "15", "-3"));
+    assert_eq!((&rows[0][44], &rows[0][45], &rows[0][46]), ("", "", ""));
     assert_eq!((&r[35], &r[36], &r[38]), ("C1", "", "cert_no"));
     assert_eq!(
         (&r[39], &r[40], &r[41], &r[42], &r[43]),
