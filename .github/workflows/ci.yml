@@ -91,7 +91,7 @@ jobs:
           awk '/Running tests\/records_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
             | grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored'
           awk '/Running tests\/schedules_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
-            | grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored'
+            | grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored'
           awk '/Running tests\/deliver_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \
             | grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored'
           awk '/Running tests\/views_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/tenko-test.txt" \

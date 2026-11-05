@@ -49,25 +49,30 @@ pub mod sql {
     pub const LIST_TENANTS: &str =
         "SELECT DISTINCT tenant_id FROM alc_api.list_tenko_overdue_webhook_configs()";
 
-    /// 予定を消費したセッションの status (消費していなければ NULL)。CLAIM の予定の別名 `s` を使う
-    const SESSION_STATUS: &str = "(SELECT ss.status FROM alc_api.tenko_sessions ss \
+    /// 予定を消費したセッションの status (消費していなければ NULL)。予定の別名は `s`
+    pub const SESSION_STATUS: &str = "(SELECT ss.status FROM alc_api.tenko_sessions ss \
          WHERE ss.id = s.consumed_by_session_id AND ss.tenant_id = s.tenant_id)";
 
-    /// 超過した予定に通知済みの印を付け、付けた行を返す (印を先に付ける。重なって動いても 1 回だけ取れる)。
-    /// 超過 = 予定の時刻 + テナントの分数 (`tenko_settings`、行が無ければ既定) を過ぎ、未消費か、消費したセッションが
-    /// `completed`・`cancelled` 以外。分数はこの 1 文の中で引く (テナントごとに 1 文のまま)。
+    /// 「超過」の条件 (予定の別名は `s`)。予定の時刻 + テナントの分数 (`tenko_settings`、行が無ければ既定) を過ぎ、
+    /// 未消費か、消費したセッションが `completed`・`cancelled` 以外。分数は文の中で引く (追加の往復は無い)。
+    /// 通知 ([`CLAIM`]) とダッシュボードの超過の一覧 ([`crate::dashboard`]) が同じ規則を使うための共有の断片
+    pub const IS_OVERDUE: &str = concatcp!(
+        "s.scheduled_at + make_interval(mins => COALESCE( \
+           (SELECT t.overdue_minutes FROM alc_api.tenko_settings t WHERE t.tenant_id = s.tenant_id), ",
+        DEFAULT_OVERDUE_MINUTES,
+        ")) < NOW() AND (s.consumed = FALSE OR COALESCE(",
+        SESSION_STATUS,
+        " NOT IN ('completed', 'cancelled'), FALSE))"
+    );
+
+    /// 超過 ([`IS_OVERDUE`]) の予定に通知済みの印を付け、付けた行を返す (印を先に付ける。重なって動いても 1 回だけ取れる)。
+    /// 分数はこの 1 文の中で引く (テナントごとに 1 文のまま)。
     /// $1 tenant_id → id, employee_id, scheduled_at, responsible_manager_name, tenko_type, 社員の名前, session_id, session_status
     pub const CLAIM: &str = concatcp!(
         "UPDATE alc_api.tenko_schedules s SET overdue_notified_at = NOW() \
-         WHERE s.tenant_id = $1 AND s.overdue_notified_at IS NULL \
-           AND s.scheduled_at + make_interval(mins => COALESCE( \
-                 (SELECT t.overdue_minutes FROM alc_api.tenko_settings t WHERE t.tenant_id = s.tenant_id), ",
-        DEFAULT_OVERDUE_MINUTES,
-        ")) < NOW() \
-           AND (s.consumed = FALSE OR COALESCE(",
-        SESSION_STATUS,
-        " NOT IN ('completed', 'cancelled'), FALSE)) \
-         RETURNING s.id, s.employee_id, s.scheduled_at, s.responsible_manager_name, s.tenko_type, \
+         WHERE s.tenant_id = $1 AND s.overdue_notified_at IS NULL AND ",
+        IS_OVERDUE,
+        " RETURNING s.id, s.employee_id, s.scheduled_at, s.responsible_manager_name, s.tenko_type, \
            (SELECT e.name FROM alc_api.employees e WHERE e.id = s.employee_id AND e.tenant_id = s.tenant_id), \
            s.consumed_by_session_id, ",
         SESSION_STATUS

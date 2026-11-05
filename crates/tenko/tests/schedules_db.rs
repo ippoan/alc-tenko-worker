@@ -442,3 +442,61 @@ async fn settings_get_put() {
     );
     assert!(app.logs().is_empty());
 }
+
+/// ダッシュボードの超過の一覧は通知と同じ規則: テナントの分数 (行が無ければ 60)、完了していない予定
+/// (未消費、または消費したセッションが completed・cancelled 以外)
+#[tokio::test]
+async fn dashboard_overdue_follows_tenant_minutes_and_unfinished_sessions() {
+    let app = app().await;
+    let t = tenant().await;
+    let short = tenant().await;
+    let e = employee(t, "超過 太郎").await;
+    let e2 = employee(short, "短い 次郎").await;
+    let su = admin().await;
+    let add = |t: Uuid, e: Uuid, ago: &'static str, session: Option<Uuid>| {
+        let su = &su;
+        async move {
+            su.query_one(
+                &format!("INSERT INTO alc_api.tenko_schedules (tenant_id, employee_id, tenko_type, responsible_manager_name, scheduled_at, consumed, consumed_by_session_id) VALUES ($1, $2, 'post_operation', 'm', now() - interval '{ago}', $3, $4) RETURNING id"),
+                &[&t, &e, &session.is_some(), &session],
+            )
+            .await
+            .unwrap()
+            .get::<_, Uuid>(0)
+        }
+    };
+    // 既定の 60 分: 2 時間前は超過、30 分前は超過でない
+    let late = add(t, e, "2 hours", None).await;
+    add(t, e, "30 minutes", None).await;
+    // 消費済み: 中断中は超過、完了は超過でない
+    let s_int = session(t, e, "自動点呼", "interrupted", false, None).await;
+    let interrupted = add(t, e, "3 hours", Some(s_int)).await;
+    let s_done = session(t, e, "自動点呼", "completed", false, None).await;
+    add(t, e, "4 hours", Some(s_done)).await;
+    // 10 分の設定のテナント: 20 分前は超過
+    su.execute(
+        "INSERT INTO alc_api.tenko_settings (tenant_id, overdue_minutes) VALUES ($1, 10)",
+        &[&short],
+    )
+    .await
+    .unwrap();
+    let short_late = add(short, e2, "20 minutes", None).await;
+
+    let ids = |v: &Value| -> Vec<String> {
+        v["overdue_schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let v = call(&app, "GET", "/api/tenko/dashboard", Some(t), None)
+        .await
+        .json();
+    // 古い順 (中断中の 3 時間前 → 2 時間前)
+    assert_eq!(ids(&v), vec![interrupted.to_string(), late.to_string()]);
+    let v = call(&app, "GET", "/api/tenko/dashboard", Some(short), None)
+        .await
+        .json();
+    assert_eq!(ids(&v), vec![short_late.to_string()]);
+}
