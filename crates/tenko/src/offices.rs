@@ -8,10 +8,14 @@
 //! - `PUT /tenko/offices/{id}` — 同じ本文で全部置き換える (省略した `manager_ids`・`vehicle_ids` は空)。無ければ 404
 //! - `DELETE /tenko/offices/{id}` — 204。無ければ 404 (所属は表の外部キーで外れる)
 //!
-//! 営業所 1 件の形: `{"id", "name", "company_name", "address", "manager_ids": [社員の id], "vehicle_ids": [車両の id]}`。
+//! 営業所 1 件の形: `{"id", "name", "company_name", "address", "manager_ids": [社員の id], "vehicle_ids": [車両の id],
+//! "carins_bases": [{"use_base", "user_name"}]}`。`carins_bases` は車検証の「使用の本拠の位置」+「使用者の氏名又は名称」の組で、
+//! 組ごとに営業所を 1 つ選ぶ (車両の所属は基本これで決まり、`vehicle_ids` で手で選んだ車両は例外の上書き)。組は 1 営業所なので別の営業所から移る。
+//! GET の応答にはさらに `"carins_bases": [{"use_base", "user_name", "office_id", "vehicle_count"}]` (car_inspection に出てくる組の全部。
+//! 使用の本拠が空の組は除く。`vehicle_count` は組ごとの distinct CarId、`office_id` は対応が無ければ null。車検証が空のテナントは空配列)。
 //! `company_name` が null なら自社、値があればグループ企業の営業所。
 //! 検める欄: 本文が読めない `invalid_body` / 名称が空 `invalid_name` / 長さ `too_long` / 営業所の件数 `too_many_offices` /
-//! id の件数 `too_many_ids` / `manager_ids` に同じテナントの在籍で role に manager か admin を含む社員以外 `invalid_manager` /
+//! 組の空 `invalid_carins_base` / id と組の件数 `too_many_ids` / `manager_ids` に同じテナントの在籍で role に manager か admin を含む社員以外 `invalid_manager` /
 //! `vehicle_ids` に同じテナントの未削除の車両以外 `invalid_vehicle`。外れたら 400 `{"error": "<語>"}`。
 //! 文字列は前後の空白を落とし、会社名・住所は空なら null。重複した id は 1 つにまとめる。
 //! `vehicle_ids` は営業所の車両の置き換え: 一覧に無い車両は所属を外し、一覧の車両はこの営業所へ付け替える (車両は 1 営業所だけ)。
@@ -55,6 +59,24 @@ pub struct OfficeInput {
     pub manager_ids: Vec<Uuid>,
     #[serde(default)]
     pub vehicle_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub carins_bases: Vec<CarinsBase>,
+}
+
+/// 車検証の「使用の本拠の位置」と「使用者の氏名又は名称」の組 (正規化の式は [`sql::CARINS`]。判定側と同じ式)
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CarinsBase {
+    pub use_base: String,
+    pub user_name: String,
+}
+
+/// 一覧の組 (車検証に出てくるもの。`office_id` はその組の対応)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CarinsBaseCount {
+    pub use_base: String,
+    pub user_name: String,
+    pub office_id: Option<Uuid>,
+    pub vehicle_count: i64,
 }
 
 /// 営業所 1 件
@@ -66,6 +88,7 @@ pub struct Office {
     pub address: Option<String>,
     pub manager_ids: Vec<Uuid>,
     pub vehicle_ids: Vec<Uuid>,
+    pub carins_bases: Vec<CarinsBase>,
 }
 
 /// 一覧の車両 (所属の付け替えに使う)
@@ -82,6 +105,7 @@ pub struct Vehicle {
 pub struct OfficeList {
     pub offices: Vec<Office>,
     pub vehicles: Vec<Vehicle>,
+    pub carins_bases: Vec<CarinsBaseCount>,
 }
 
 impl TxOutput for OfficeList {}
@@ -116,11 +140,32 @@ impl OfficeInput {
         {
             return Err("too_long");
         }
+        for b in &mut self.carins_bases {
+            b.use_base = b.use_base.trim().to_owned();
+            b.user_name = b.user_name.trim().to_owned();
+        }
+        if self
+            .carins_bases
+            .iter()
+            .any(|b| b.use_base.is_empty() || b.user_name.is_empty())
+        {
+            return Err("invalid_carins_base");
+        }
+        if self.carins_bases.iter().any(|b| {
+            b.use_base.chars().count() > MAX_CHARS || b.user_name.chars().count() > MAX_CHARS
+        }) {
+            return Err("too_long");
+        }
+        self.carins_bases.sort_unstable();
+        self.carins_bases.dedup();
         self.manager_ids.sort_unstable();
         self.manager_ids.dedup();
         self.vehicle_ids.sort_unstable();
         self.vehicle_ids.dedup();
-        if self.manager_ids.len() > MAX_IDS || self.vehicle_ids.len() > MAX_IDS {
+        if self.manager_ids.len() > MAX_IDS
+            || self.vehicle_ids.len() > MAX_IDS
+            || self.carins_bases.len() > MAX_IDS
+        {
             return Err("too_many_ids");
         }
         Ok(self)
@@ -143,6 +188,32 @@ pub mod sql {
     /// 未削除の車両。$1 tenant_id
     pub const VEHICLES: &str = "SELECT id, registration_number, display_name, office_id FROM alc_api.maintenance_vehicles \
          WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY registration_number, id";
+
+    /// 営業所に対応づけた組。$1 tenant_id / $2 営業所の id (null なら全部)
+    pub const BASES: &str = "SELECT office_id, use_base, user_name FROM alc_api.tenko_office_carins_bases \
+         WHERE tenant_id = $1 AND ($2::uuid IS NULL OR office_id = $2) ORDER BY use_base, user_name";
+
+    /// 車検証に出てくる組と、組ごとの車両数 (distinct CarId) と対応。組の式は判定 (alc-measurements-worker) と同じ。
+    /// 使用の本拠が空の組は除く。$1 tenant_id
+    pub const CARINS: &str = "SELECT g.use_base, g.user_name, b.office_id, g.vehicle_count FROM ( \
+             SELECT btrim(ci.\"UseheadqrterChar\") AS use_base, \
+                    btrim(COALESCE(NULLIF(btrim(ci.\"UsernameHighLevelChar\"), ''), ci.\"UsernameLowLevelChar\")) AS user_name, \
+                    count(DISTINCT ci.\"CarId\") AS vehicle_count \
+             FROM alc_api.car_inspection ci \
+             WHERE ci.tenant_id = $1 AND btrim(ci.\"UseheadqrterChar\") <> '' \
+             GROUP BY 1, 2) g \
+         LEFT JOIN alc_api.tenko_office_carins_bases b \
+             ON b.tenant_id = $1 AND b.use_base = g.use_base AND b.user_name = g.user_name \
+         ORDER BY g.use_base, g.user_name";
+
+    /// 営業所の組を全部消す。$1 tenant_id / $2 office_id
+    pub const CLEAR_BASES: &str =
+        "DELETE FROM alc_api.tenko_office_carins_bases WHERE tenant_id = $1 AND office_id = $2";
+
+    /// 組をこの営業所に対応づける (別の営業所に在った組は付け替える)。$1 tenant_id / $2 office_id / $3 use_base の配列 / $4 user_name の配列
+    pub const ADD_BASES: &str = "INSERT INTO alc_api.tenko_office_carins_bases (tenant_id, office_id, use_base, user_name) \
+         SELECT $1, $2, unnest($3::text[]), unnest($4::text[]) \
+         ON CONFLICT (tenant_id, use_base, user_name) DO UPDATE SET office_id = EXCLUDED.office_id";
 
     /// 営業所の件数。$1 tenant_id
     pub const COUNT: &str = "SELECT count(*) FROM alc_api.tenko_offices WHERE tenant_id = $1";
@@ -200,6 +271,9 @@ async fn load(tx: &TenantTx<'_>, tenant_id: Uuid, only: Option<Uuid>) -> Result<
             &[(&tenant_id, Type::UUID), (&only, Type::UUID)],
         )
         .await?;
+    let bases = tx
+        .query_typed(sql::BASES, &[(&tenant_id, Type::UUID), (&only, Type::UUID)])
+        .await?;
     let vehicles = tx
         .query_typed(sql::VEHICLES, &[(&tenant_id, Type::UUID)])
         .await?;
@@ -231,15 +305,42 @@ async fn load(tx: &TenantTx<'_>, tenant_id: Uuid, only: Option<Uuid>) -> Result<
                     .filter(|v| v.office_id == Some(id))
                     .map(|v| v.id)
                     .collect(),
+                carins_bases: bases
+                    .iter()
+                    .filter(|b| b.get::<_, Uuid>(0) == id)
+                    .map(|b| CarinsBase {
+                        use_base: b.get(1),
+                        user_name: b.get(2),
+                    })
+                    .collect(),
             }
         })
         .collect();
-    Ok(OfficeList { offices, vehicles })
+    Ok(OfficeList {
+        offices,
+        vehicles,
+        carins_bases: Vec::new(),
+    })
 }
 
 pub async fn list(pg: &mut PgClient, tenant_id: Uuid) -> Result<OfficeList, Error> {
     pg.tenant_tx(tenant_id, move |tx| {
-        Box::pin(async move { load(tx, tenant_id, None).await })
+        Box::pin(async move {
+            let mut out = load(tx, tenant_id, None).await?;
+            // car_inspection が空のテナント (車検証を取り込んでいない) は空の配列
+            out.carins_bases = tx
+                .query_typed(sql::CARINS, &[(&tenant_id, Type::UUID)])
+                .await?
+                .iter()
+                .map(|r| CarinsBaseCount {
+                    use_base: r.get(0),
+                    user_name: r.get(1),
+                    office_id: r.get(2),
+                    vehicle_count: r.get(3),
+                })
+                .collect();
+            Ok(out)
+        })
     })
     .await
 }
@@ -323,6 +424,24 @@ pub async fn save(
             ];
             tx.execute_typed(sql::RELEASE_VEHICLES, &vehicles).await?;
             tx.execute_typed(sql::ASSIGN_VEHICLES, &vehicles).await?;
+            let use_bases: Vec<&str> = input
+                .carins_bases
+                .iter()
+                .map(|b| b.use_base.as_str())
+                .collect();
+            let user_names: Vec<&str> = input
+                .carins_bases
+                .iter()
+                .map(|b| b.user_name.as_str())
+                .collect();
+            tx.execute_typed(sql::CLEAR_BASES, &who).await?;
+            let bases: [Arg; 4] = [
+                (&tenant_id, Type::UUID),
+                (&office_id, Type::UUID),
+                (&use_bases, Type::TEXT_ARRAY),
+                (&user_names, Type::TEXT_ARRAY),
+            ];
+            tx.execute_typed(sql::ADD_BASES, &bases).await?;
             let mut out = load(tx, tenant_id, Some(office_id)).await?;
             // 今書いた営業所は必ず在る (同じ transaction の中)
             Ok(Saved::Done(out.offices.remove(0)))

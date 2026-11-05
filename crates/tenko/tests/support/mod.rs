@@ -52,6 +52,8 @@ pub const TABLES: &[&str] = &[
     "tenko_filing_settings",
     "tenko_offices",
     "tenko_office_managers",
+    "tenko_office_carins_bases",
+    "car_inspection",
 ];
 
 fn migrations_dir() -> std::path::PathBuf {
