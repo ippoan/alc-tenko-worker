@@ -358,7 +358,7 @@ async fn offices_crud() {
         a,
         json!({
             "id": a_id, "name": "架空運輸 本社", "company_name": null, "address": null,
-            "manager_ids": [m2], "vehicle_ids": [v3], "carins_bases": []
+            "manager_ids": [m2], "vehicle_ids": [v3], "carins_bases": [], "device_ids": []
         })
     );
     assert_eq!(vehicle_office(v2).await, None);
@@ -626,6 +626,109 @@ async fn offices_carins_bases() {
     assert_eq!(count("tenko_office_carins_bases", t).await, 0);
     let list = call(&app, "GET", PATH, Some(t), None).await.json();
     assert_eq!(list["carins_bases"][1]["office_id"], json!(null));
+    assert!(app.logs().is_empty());
+}
+
+#[tokio::test]
+async fn offices_devices() {
+    let app = app().await;
+    let t = tenant().await;
+    let other = tenant().await;
+    let ids = |v: &Value| v["device_ids"].clone();
+
+    // 空白を落とす・重複はまとめる・device_id 順
+    let a = call(
+        &app,
+        "POST",
+        PATH,
+        Some(t),
+        Some(json!({ "name": "架空 A営業所", "device_ids": [" dev-b ", "dev-a", "dev-b", "AA:11_x"] })),
+    )
+    .await;
+    assert_eq!(a.status, 201);
+    let a = a.json();
+    assert_eq!(ids(&a), json!(["AA:11_x", "dev-a", "dev-b"]));
+    let a_id = a["id"].as_str().unwrap().to_owned();
+
+    // 別の営業所へ移る (A からは外れる)。省略した PUT は空に置き換える
+    let b = call(
+        &app,
+        "POST",
+        PATH,
+        Some(t),
+        Some(json!({ "name": "架空 B営業所", "device_ids": ["dev-a"] })),
+    )
+    .await
+    .json();
+    let b_id = b["id"].as_str().unwrap().to_owned();
+    assert_eq!(ids(&b), json!(["dev-a"]));
+    let list = call(&app, "GET", PATH, Some(t), None).await.json();
+    assert_eq!(ids(&list["offices"][0]), json!(["AA:11_x", "dev-b"]));
+    assert_eq!(ids(&list["offices"][1]), json!(["dev-a"]));
+    assert_eq!(count("tenko_office_devices", t).await, 3);
+
+    // 検査 (外れたら何も書かない)。形・長さ・件数
+    let many: Vec<String> = (0..1001).map(|i| format!("d{i}")).collect();
+    for (devices, word) in [
+        (json!(["ok", ""]), "invalid_device"),
+        (json!(["  "]), "invalid_device"),
+        (json!(["a b"]), "invalid_device"),
+        (json!(["日本語"]), "invalid_device"),
+        (json!(["a".repeat(65)]), "invalid_device"),
+        (json!(many), "too_many_ids"),
+    ] {
+        let got = call(
+            &app,
+            "PUT",
+            &format!("{PATH}/{b_id}"),
+            Some(t),
+            Some(json!({ "name": "架空 B営業所", "device_ids": devices })),
+        )
+        .await;
+        assert_eq!((got.status, got.json()), (400, json!({ "error": word })));
+    }
+    assert_eq!(count("tenko_office_devices", t).await, 3);
+    let ok64 = "a".repeat(64);
+    let put = call(
+        &app,
+        "PUT",
+        &format!("{PATH}/{b_id}"),
+        Some(t),
+        Some(json!({ "name": "架空 B営業所", "device_ids": [ok64] })),
+    )
+    .await;
+    assert_eq!(put.status, 200);
+    let put = call(
+        &app,
+        "PUT",
+        &format!("{PATH}/{b_id}"),
+        Some(t),
+        Some(json!({ "name": "架空 B営業所" })),
+    )
+    .await;
+    assert_eq!(ids(&put.json()), json!([]));
+    assert_eq!(count("tenko_office_devices", t).await, 2);
+
+    // 他のテナントの行は見えず、同じ端末の id も別に持てる。営業所を消すと所属も消える
+    let theirs = call(
+        &app,
+        "POST",
+        PATH,
+        Some(other),
+        Some(json!({ "name": "架空の他社営業所", "device_ids": ["dev-b"] })),
+    )
+    .await;
+    assert_eq!(ids(&theirs.json()), json!(["dev-b"]));
+    let list = call(&app, "GET", PATH, Some(t), None).await.json();
+    assert_eq!(ids(&list["offices"][0]), json!(["AA:11_x", "dev-b"]));
+    assert_eq!(
+        call(&app, "DELETE", &format!("{PATH}/{a_id}"), Some(t), None)
+            .await
+            .status,
+        204
+    );
+    assert_eq!(count("tenko_office_devices", t).await, 0);
+    assert_eq!(count("tenko_office_devices", other).await, 1);
     assert!(app.logs().is_empty());
 }
 
