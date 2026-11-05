@@ -500,25 +500,25 @@ async fn offices_carins_bases() {
 
     // 組は (使用の本拠, 使用者) で、使用者は高位の欄が空なら低位の欄 (どちらも前後の空白を落とす)。
     // 使用の本拠が空の行は除き、車両数は distinct CarId
-    car_inspection(t, "C1", "CAR1", " KANTO 1-1 ", " ACME ", "ignored").await;
-    car_inspection(t, "C2", "CAR2", "KANTO 1-1", "ACME", "").await;
-    car_inspection(t, "C3", "CAR2", "KANTO 1-1", "ACME", "").await;
-    car_inspection(t, "C4", "CAR3", "KANSAI 2-2", "  ", " LOWNAME ").await;
+    car_inspection(t, "C1", "CAR1", " KANTO1-1 ", " ACME ", "ignored").await;
+    car_inspection(t, "C2", "CAR2", "KANTO1-1", "ACME", "").await;
+    car_inspection(t, "C3", "CAR2", "KANTO1-1", "ACME", "").await;
+    car_inspection(t, "C4", "CAR3", "KANSAI2-2", "  ", " LOWNAME ").await;
     car_inspection(t, "C5", "CAR4", "  ", "ACME", "").await;
-    car_inspection(other, "C6", "CAR5", "OTHER 9-9", "OTHERCO", "").await;
+    car_inspection(other, "C6", "CAR5", "OTHER9-9", "OTHERCO", "").await;
     let bases = |v: &Value| v["carins_bases"].clone();
     let list = call(&app, "GET", PATH, Some(t), None).await.json();
     assert_eq!(
         bases(&list),
         json!([
-            { "use_base": "KANSAI 2-2", "user_name": "LOWNAME", "office_id": null, "vehicle_count": 1 },
-            { "use_base": "KANTO 1-1", "user_name": "ACME", "office_id": null, "vehicle_count": 2 },
+            { "use_base": "KANSAI2-2", "user_name": "LOWNAME", "office_id": null, "vehicle_count": 1 },
+            { "use_base": "KANTO1-1", "user_name": "ACME", "office_id": null, "vehicle_count": 2 },
         ])
     );
     let theirs = call(&app, "GET", PATH, Some(other), None).await.json();
     assert_eq!(
         bases(&theirs),
-        json!([{ "use_base": "OTHER 9-9", "user_name": "OTHERCO", "office_id": null, "vehicle_count": 1 }])
+        json!([{ "use_base": "OTHER9-9", "user_name": "OTHERCO", "office_id": null, "vehicle_count": 1 }])
     );
 
     // 営業所に組を対応づける (空白を落とす・重複はまとめる)。車検証に無い組も置ける
@@ -528,9 +528,9 @@ async fn offices_carins_bases() {
         PATH,
         Some(t),
         Some(json!({ "name": "架空 A営業所", "carins_bases": [
-            { "use_base": " KANTO 1-1 ", "user_name": " ACME " },
-            { "use_base": "KANTO 1-1", "user_name": "ACME" },
-            { "use_base": "NOT YET", "user_name": "ACME" },
+            { "use_base": " KANTO1-1 ", "user_name": " ACME " },
+            { "use_base": "KANTO1-1", "user_name": "ACME" },
+            { "use_base": "NOTYET", "user_name": "ACME" },
         ] })),
     )
     .await;
@@ -539,8 +539,8 @@ async fn offices_carins_bases() {
     assert_eq!(
         a["carins_bases"],
         json!([
-            { "use_base": "KANTO 1-1", "user_name": "ACME" },
-            { "use_base": "NOT YET", "user_name": "ACME" },
+            { "use_base": "KANTO1-1", "user_name": "ACME" },
+            { "use_base": "NOTYET", "user_name": "ACME" },
         ])
     );
     let a_id = a["id"].as_str().unwrap().to_owned();
@@ -554,20 +554,20 @@ async fn offices_carins_bases() {
         "POST",
         PATH,
         Some(t),
-        Some(json!({ "name": "架空 B営業所", "carins_bases": [{ "use_base": "KANTO 1-1", "user_name": "ACME" }] })),
+        Some(json!({ "name": "架空 B営業所", "carins_bases": [{ "use_base": "KANTO1-1", "user_name": "ACME" }] })),
     )
     .await
     .json();
     let b_id = b["id"].as_str().unwrap().to_owned();
     assert_eq!(
         b["carins_bases"],
-        json!([{ "use_base": "KANTO 1-1", "user_name": "ACME" }])
+        json!([{ "use_base": "KANTO1-1", "user_name": "ACME" }])
     );
     let list = call(&app, "GET", PATH, Some(t), None).await.json();
     assert_eq!(list["carins_bases"][1]["office_id"], json!(b_id));
     assert_eq!(
         list["offices"][0]["carins_bases"],
-        json!([{ "use_base": "NOT YET", "user_name": "ACME" }])
+        json!([{ "use_base": "NOTYET", "user_name": "ACME" }])
     );
     assert_eq!(count("tenko_office_carins_bases", t).await, 2);
 
@@ -735,6 +735,118 @@ async fn offices_devices() {
     );
     assert_eq!(count("tenko_office_devices", t).await, 0);
     assert_eq!(count("tenko_office_devices", other).await, 1);
+    assert!(app.logs().is_empty());
+}
+
+#[tokio::test]
+async fn offices_carins_bases_ignore_spaces() {
+    let app = app().await;
+    let t = tenant().await;
+    let name = "有限会社大石運輸本社営業所";
+
+    // 空白 (半角・全角) の有無だけ違う 2 枚の車検証は 1 組 (台数 2)
+    car_inspection(
+        t,
+        "S1",
+        "CAR1",
+        "KANTO 1-1",
+        "有限会社　大石運輸　本社営業所",
+        "",
+    )
+    .await;
+    car_inspection(
+        t,
+        "S2",
+        "CAR2",
+        "KANTO1-1",
+        "有限会社大石運輸　本社営業所",
+        "",
+    )
+    .await;
+    let one = |office: Value| json!([{ "use_base": "KANTO1-1", "user_name": name, "office_id": office, "vehicle_count": 2 }]);
+    let list = call(&app, "GET", PATH, Some(t), None).await.json();
+    assert_eq!(list["carins_bases"], one(json!(null)));
+
+    // 空白入りで保存した古い行 (直接 INSERT) が一覧の office_id に効く。複数の営業所に分かれていたら office_id が最小の 1 つ
+    let mk = |n: &str| {
+        let app = &app;
+        let n = n.to_owned();
+        async move {
+            call(app, "POST", PATH, Some(t), Some(json!({ "name": n })))
+                .await
+                .json()["id"]
+                .as_str()
+                .unwrap()
+                .parse::<Uuid>()
+                .unwrap()
+        }
+    };
+    let x = mk("架空 X営業所").await;
+    let y = mk("架空 Y営業所").await;
+    for (office, base, user) in [
+        (x, "KANTO 1-1", "有限会社 大石運輸 本社営業所"),
+        (y, "KANTO1-1 ", "有限会社大石運輸　本社営業所"),
+    ] {
+        admin()
+            .await
+            .execute(
+                "INSERT INTO alc_api.tenko_office_carins_bases (tenant_id, office_id, use_base, user_name) VALUES ($1, $2, $3, $4)",
+                &[&t, &office, &base, &user],
+            )
+            .await
+            .unwrap();
+    }
+    let list = call(&app, "GET", PATH, Some(t), None).await.json();
+    assert_eq!(list["carins_bases"], one(json!(x.min(y))));
+    // 営業所ごとの組は正規化して返す
+    let own: Vec<_> = list["offices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["carins_bases"].clone())
+        .collect();
+    assert_eq!(
+        own,
+        vec![json!([{ "use_base": "KANTO1-1", "user_name": name }]); 2]
+    );
+
+    // 空白入りの入力は正規化して保存し、別の営業所の空白違いの古い行は消える
+    let z = call(
+        &app,
+        "POST",
+        PATH,
+        Some(t),
+        Some(json!({ "name": "架空 Z営業所", "carins_bases": [
+            { "use_base": " KANTO　1-1 ", "user_name": "有限会社　大石運輸　本社営業所" },
+            { "use_base": "KANTO1-1", "user_name": name },
+        ] })),
+    )
+    .await;
+    assert_eq!(z.status, 201);
+    let z = z.json();
+    assert_eq!(
+        z["carins_bases"],
+        json!([{ "use_base": "KANTO1-1", "user_name": name }])
+    );
+    let z_id: Uuid = z["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(count("tenko_office_carins_bases", t).await, 1);
+    let list = call(&app, "GET", PATH, Some(t), None).await.json();
+    assert_eq!(list["carins_bases"], one(json!(z_id)));
+
+    // 空白だけの値は空と同じ
+    let got = call(
+        &app,
+        "POST",
+        PATH,
+        Some(t),
+        Some(json!({ "name": "架空", "carins_bases": [{ "use_base": " 　 ", "user_name": "u" }] })),
+    )
+    .await;
+    assert_eq!(
+        (got.status, got.json()),
+        (400, json!({ "error": "invalid_carins_base" }))
+    );
+    assert_eq!(count("tenko_office_carins_bases", t).await, 1);
     assert!(app.logs().is_empty());
 }
 

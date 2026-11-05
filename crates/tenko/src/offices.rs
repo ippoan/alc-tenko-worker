@@ -14,8 +14,10 @@
 //! `device_ids` は営業所に所属する点呼端末 (auth-worker の端末の鍵の登録簿の id。`^[A-Za-z0-9:_-]{1,64}$`、登録簿に在るかは検査しない。
 //! 1 台を複数の営業所に所属させられる (同じ建物の別の会社の営業所が共用する。migration 208)。キオスクの車両の候補の並びだけに使い、
 //! 判定には使わない)。
+//! 組の値は半角・全角の空白を全部取り除いた形に正規化する (車検証ごとの表記の揺れで組が分かれないように。入力・保存済みの行・車検証、
+//! どれも同じ規則で、判定の alc-measurements-worker と同じ式)。保存では同じ組の既存の行 (別の営業所・空白入りの古い行も) を消してから入れる。
 //! GET の応答にはさらに `"carins_bases": [{"use_base", "user_name", "office_id", "vehicle_count"}]` (car_inspection に出てくる組の全部。
-//! 使用の本拠が空の組は除く。`vehicle_count` は組ごとの distinct CarId、`office_id` は対応が無ければ null。車検証が空のテナントは空配列)。
+//! 使用の本拠が空の組は除く。`office_id` は保存済みの対応のうち正規化して一致するもの (複数の営業所に分かれていたら office_id が最小の 1 つ)。`vehicle_count` は組ごとの distinct CarId、`office_id` は対応が無ければ null。車検証が空のテナントは空配列)。
 //! `company_name` が null なら自社、値があればグループ企業の営業所。
 //! 検める欄: 本文が読めない `invalid_body` / 名称が空 `invalid_name` / 長さ `too_long` / 営業所の件数 `too_many_offices` /
 //! 組の空 `invalid_carins_base` / 端末の id の形 `invalid_device` / id と組の件数 `too_many_ids` / `manager_ids` に同じテナントの在籍で role に manager か admin を含む社員以外 `invalid_manager` /
@@ -147,8 +149,8 @@ impl OfficeInput {
             return Err("too_long");
         }
         for b in &mut self.carins_bases {
-            b.use_base = b.use_base.trim().to_owned();
-            b.user_name = b.user_name.trim().to_owned();
+            b.use_base = squash(&b.use_base);
+            b.user_name = squash(&b.user_name);
         }
         if self
             .carins_bases
@@ -193,6 +195,14 @@ impl OfficeInput {
     }
 }
 
+/// 組の値の正規化: 半角・全角の空白を全部取り除く (車検証ごとの表記の揺れで組が分かれないように)。
+/// SQL 側 ([`sql::CARINS`] ほか) の `regexp_replace(x, '[[:space:]　]', '', 'g')` と、alc-measurements-worker の判定の式と同じ規則
+pub fn squash(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != '\u{3000}')
+        .collect()
+}
+
 fn clean(v: Option<String>) -> Option<String> {
     v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
 }
@@ -210,8 +220,11 @@ pub mod sql {
     pub const VEHICLES: &str = "SELECT id, registration_number, display_name, office_id FROM alc_api.maintenance_vehicles \
          WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY registration_number, id";
 
-    /// 営業所に対応づけた組。$1 tenant_id / $2 営業所の id (null なら全部)
-    pub const BASES: &str = "SELECT office_id, use_base, user_name FROM alc_api.tenko_office_carins_bases \
+    /// 営業所に対応づけた組 (保存済みの行を空白なしに正規化して、重複を除く)。$1 tenant_id / $2 営業所の id (null なら全部)
+    pub const BASES: &str = "SELECT DISTINCT office_id, \
+             regexp_replace(use_base, '[[:space:]　]', '', 'g') AS use_base, \
+             regexp_replace(user_name, '[[:space:]　]', '', 'g') AS user_name \
+         FROM alc_api.tenko_office_carins_bases \
          WHERE tenant_id = $1 AND ($2::uuid IS NULL OR office_id = $2) ORDER BY use_base, user_name";
 
     /// 営業所に所属する端末。$1 tenant_id / $2 営業所の id (null なら全部)
@@ -228,27 +241,39 @@ pub mod sql {
         "INSERT INTO alc_api.tenko_office_devices (tenant_id, office_id, device_id) \
          SELECT $1, $2, unnest($3::text[]) ON CONFLICT DO NOTHING";
 
-    /// 車検証に出てくる組と、組ごとの車両数 (distinct CarId) と対応。組の式は判定 (alc-measurements-worker) と同じ。
-    /// 使用の本拠が空の組は除く。$1 tenant_id
+    /// 車検証に出てくる組と、組ごとの車両数 (distinct CarId) と対応。組の式は判定 (alc-measurements-worker) と同じ
+    /// (`btrim` した値から半角・全角の空白を全部取り除く)。使用の本拠が空の組は除く。
+    /// `office_id` は保存済みの対応のうち、同じように正規化して一致するもの。複数の営業所に分かれていたら office_id が最小のもの 1 つ。$1 tenant_id
     pub const CARINS: &str = "SELECT g.use_base, g.user_name, b.office_id, g.vehicle_count FROM ( \
-             SELECT btrim(ci.\"UseheadqrterChar\") AS use_base, \
-                    btrim(COALESCE(NULLIF(btrim(ci.\"UsernameHighLevelChar\"), ''), ci.\"UsernameLowLevelChar\")) AS user_name, \
+             SELECT regexp_replace(btrim(ci.\"UseheadqrterChar\"), '[[:space:]　]', '', 'g') AS use_base, \
+                    regexp_replace(btrim(COALESCE(NULLIF(btrim(ci.\"UsernameHighLevelChar\"), ''), ci.\"UsernameLowLevelChar\")), \
+                                   '[[:space:]　]', '', 'g') AS user_name, \
                     count(DISTINCT ci.\"CarId\") AS vehicle_count \
              FROM alc_api.car_inspection ci \
-             WHERE ci.tenant_id = $1 AND btrim(ci.\"UseheadqrterChar\") <> '' \
+             WHERE ci.tenant_id = $1 \
              GROUP BY 1, 2) g \
-         LEFT JOIN alc_api.tenko_office_carins_bases b \
-             ON b.tenant_id = $1 AND b.use_base = g.use_base AND b.user_name = g.user_name \
-         ORDER BY g.use_base, g.user_name";
+         LEFT JOIN ( \
+             SELECT regexp_replace(use_base, '[[:space:]　]', '', 'g') AS use_base, \
+                    regexp_replace(user_name, '[[:space:]　]', '', 'g') AS user_name, \
+                    (array_agg(office_id ORDER BY office_id))[1] AS office_id \
+             FROM alc_api.tenko_office_carins_bases WHERE tenant_id = $1 GROUP BY 1, 2) b \
+             ON b.use_base = g.use_base AND b.user_name = g.user_name \
+         WHERE g.use_base <> '' ORDER BY g.use_base, g.user_name";
 
     /// 営業所の組を全部消す。$1 tenant_id / $2 office_id
     pub const CLEAR_BASES: &str =
         "DELETE FROM alc_api.tenko_office_carins_bases WHERE tenant_id = $1 AND office_id = $2";
 
-    /// 組をこの営業所に対応づける (別の営業所に在った組は付け替える)。$1 tenant_id / $2 office_id / $3 use_base の配列 / $4 user_name の配列
+    /// 同じ組 (空白を除いて一致するもの) の既存の行を、どの営業所のものでも消す (空白入りの古い行も)。
+    /// $1 tenant_id / $2 use_base の配列 / $3 user_name の配列 (正規化済み)
+    pub const CLEAR_MATCHING_BASES: &str = "DELETE FROM alc_api.tenko_office_carins_bases \
+         WHERE tenant_id = $1 AND (regexp_replace(use_base, '[[:space:]　]', '', 'g'), \
+                                   regexp_replace(user_name, '[[:space:]　]', '', 'g')) \
+               IN (SELECT * FROM unnest($2::text[], $3::text[]))";
+
+    /// 組をこの営業所に対応づける (直前に同じ組を消しているので重ならない)。$1 tenant_id / $2 office_id / $3 use_base の配列 / $4 user_name の配列
     pub const ADD_BASES: &str = "INSERT INTO alc_api.tenko_office_carins_bases (tenant_id, office_id, use_base, user_name) \
-         SELECT $1, $2, unnest($3::text[]), unnest($4::text[]) \
-         ON CONFLICT (tenant_id, use_base, user_name) DO UPDATE SET office_id = EXCLUDED.office_id";
+         SELECT $1, $2, unnest($3::text[]), unnest($4::text[])";
 
     /// 営業所の件数。$1 tenant_id
     pub const COUNT: &str = "SELECT count(*) FROM alc_api.tenko_offices WHERE tenant_id = $1";
@@ -480,6 +505,14 @@ pub async fn save(
                 .iter()
                 .map(|b| b.user_name.as_str())
                 .collect();
+            // 組は 1 営業所: 同じ組の既存の行 (別の営業所・空白入りの古い行も) とこの営業所の行を消してから入れる
+            let matching: [Arg; 3] = [
+                (&tenant_id, Type::UUID),
+                (&use_bases, Type::TEXT_ARRAY),
+                (&user_names, Type::TEXT_ARRAY),
+            ];
+            tx.execute_typed(sql::CLEAR_MATCHING_BASES, &matching)
+                .await?;
             tx.execute_typed(sql::CLEAR_BASES, &who).await?;
             let bases: [Arg; 4] = [
                 (&tenant_id, Type::UUID),
