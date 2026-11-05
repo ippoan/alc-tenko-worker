@@ -53,6 +53,7 @@ pub const TABLES: &[&str] = &[
     "tenko_offices",
     "tenko_office_managers",
     "tenko_office_carins_bases",
+    "tenko_office_devices",
     "car_inspection",
 ];
 

@@ -11,11 +11,13 @@
 //! 営業所 1 件の形: `{"id", "name", "company_name", "address", "manager_ids": [社員の id], "vehicle_ids": [車両の id],
 //! "carins_bases": [{"use_base", "user_name"}]}`。`carins_bases` は車検証の「使用の本拠の位置」+「使用者の氏名又は名称」の組で、
 //! 組ごとに営業所を 1 つ選ぶ (車両の所属は基本これで決まり、`vehicle_ids` で手で選んだ車両は例外の上書き)。組は 1 営業所なので別の営業所から移る。
+//! `device_ids` は営業所に所属する点呼端末 (auth-worker の端末の鍵の登録簿の id。`^[A-Za-z0-9:_-]{1,64}$`、登録簿に在るかは検査しない。
+//! 1 台 1 営業所で別の営業所から移る。キオスクの車両の候補の並びだけに使い、判定には使わない)。
 //! GET の応答にはさらに `"carins_bases": [{"use_base", "user_name", "office_id", "vehicle_count"}]` (car_inspection に出てくる組の全部。
 //! 使用の本拠が空の組は除く。`vehicle_count` は組ごとの distinct CarId、`office_id` は対応が無ければ null。車検証が空のテナントは空配列)。
 //! `company_name` が null なら自社、値があればグループ企業の営業所。
 //! 検める欄: 本文が読めない `invalid_body` / 名称が空 `invalid_name` / 長さ `too_long` / 営業所の件数 `too_many_offices` /
-//! 組の空 `invalid_carins_base` / id と組の件数 `too_many_ids` / `manager_ids` に同じテナントの在籍で role に manager か admin を含む社員以外 `invalid_manager` /
+//! 組の空 `invalid_carins_base` / 端末の id の形 `invalid_device` / id と組の件数 `too_many_ids` / `manager_ids` に同じテナントの在籍で role に manager か admin を含む社員以外 `invalid_manager` /
 //! `vehicle_ids` に同じテナントの未削除の車両以外 `invalid_vehicle`。外れたら 400 `{"error": "<語>"}`。
 //! 文字列は前後の空白を落とし、会社名・住所は空なら null。重複した id は 1 つにまとめる。
 //! `vehicle_ids` は営業所の車両の置き換え: 一覧に無い車両は所属を外し、一覧の車両はこの営業所へ付け替える (車両は 1 営業所だけ)。
@@ -61,6 +63,8 @@ pub struct OfficeInput {
     pub vehicle_ids: Vec<Uuid>,
     #[serde(default)]
     pub carins_bases: Vec<CarinsBase>,
+    #[serde(default)]
+    pub device_ids: Vec<String>,
 }
 
 /// 車検証の「使用の本拠の位置」と「使用者の氏名又は名称」の組 (正規化の式は [`sql::CARINS`]。判定側と同じ式)
@@ -89,6 +93,7 @@ pub struct Office {
     pub manager_ids: Vec<Uuid>,
     pub vehicle_ids: Vec<Uuid>,
     pub carins_bases: Vec<CarinsBase>,
+    pub device_ids: Vec<String>,
 }
 
 /// 一覧の車両 (所属の付け替えに使う)
@@ -156,6 +161,20 @@ impl OfficeInput {
         }) {
             return Err("too_long");
         }
+        for d in &mut self.device_ids {
+            *d = d.trim().to_owned();
+        }
+        // 端末の id の形 (表の CHECK `^[A-Za-z0-9:_-]{1,64}$` と同じ。登録簿に在るかは検査しない)
+        if self.device_ids.iter().any(|d| {
+            !(1..=64).contains(&d.len())
+                || !d
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-'))
+        }) {
+            return Err("invalid_device");
+        }
+        self.device_ids.sort_unstable();
+        self.device_ids.dedup();
         self.carins_bases.sort_unstable();
         self.carins_bases.dedup();
         self.manager_ids.sort_unstable();
@@ -165,6 +184,7 @@ impl OfficeInput {
         if self.manager_ids.len() > MAX_IDS
             || self.vehicle_ids.len() > MAX_IDS
             || self.carins_bases.len() > MAX_IDS
+            || self.device_ids.len() > MAX_IDS
         {
             return Err("too_many_ids");
         }
@@ -192,6 +212,20 @@ pub mod sql {
     /// 営業所に対応づけた組。$1 tenant_id / $2 営業所の id (null なら全部)
     pub const BASES: &str = "SELECT office_id, use_base, user_name FROM alc_api.tenko_office_carins_bases \
          WHERE tenant_id = $1 AND ($2::uuid IS NULL OR office_id = $2) ORDER BY use_base, user_name";
+
+    /// 営業所に所属する端末。$1 tenant_id / $2 営業所の id (null なら全部)
+    pub const DEVICES: &str = "SELECT office_id, device_id FROM alc_api.tenko_office_devices \
+         WHERE tenant_id = $1 AND ($2::uuid IS NULL OR office_id = $2) ORDER BY device_id";
+
+    /// 営業所の端末を全部外す。$1 tenant_id / $2 office_id
+    pub const CLEAR_DEVICES: &str =
+        "DELETE FROM alc_api.tenko_office_devices WHERE tenant_id = $1 AND office_id = $2";
+
+    /// 端末をこの営業所に所属させる (別の営業所に在った端末は付け替える)。$1 tenant_id / $2 office_id / $3 device_id の配列
+    pub const ADD_DEVICES: &str =
+        "INSERT INTO alc_api.tenko_office_devices (tenant_id, office_id, device_id) \
+         SELECT $1, $2, unnest($3::text[]) \
+         ON CONFLICT (tenant_id, device_id) DO UPDATE SET office_id = EXCLUDED.office_id";
 
     /// 車検証に出てくる組と、組ごとの車両数 (distinct CarId) と対応。組の式は判定 (alc-measurements-worker) と同じ。
     /// 使用の本拠が空の組は除く。$1 tenant_id
@@ -274,6 +308,12 @@ async fn load(tx: &TenantTx<'_>, tenant_id: Uuid, only: Option<Uuid>) -> Result<
     let bases = tx
         .query_typed(sql::BASES, &[(&tenant_id, Type::UUID), (&only, Type::UUID)])
         .await?;
+    let devices = tx
+        .query_typed(
+            sql::DEVICES,
+            &[(&tenant_id, Type::UUID), (&only, Type::UUID)],
+        )
+        .await?;
     let vehicles = tx
         .query_typed(sql::VEHICLES, &[(&tenant_id, Type::UUID)])
         .await?;
@@ -312,6 +352,11 @@ async fn load(tx: &TenantTx<'_>, tenant_id: Uuid, only: Option<Uuid>) -> Result<
                         use_base: b.get(1),
                         user_name: b.get(2),
                     })
+                    .collect(),
+                device_ids: devices
+                    .iter()
+                    .filter(|d| d.get::<_, Uuid>(0) == id)
+                    .map(|d| d.get(1))
                     .collect(),
             }
         })
@@ -442,6 +487,13 @@ pub async fn save(
                 (&user_names, Type::TEXT_ARRAY),
             ];
             tx.execute_typed(sql::ADD_BASES, &bases).await?;
+            tx.execute_typed(sql::CLEAR_DEVICES, &who).await?;
+            let devices: [Arg; 3] = [
+                (&tenant_id, Type::UUID),
+                (&office_id, Type::UUID),
+                (&input.device_ids, Type::TEXT_ARRAY),
+            ];
+            tx.execute_typed(sql::ADD_DEVICES, &devices).await?;
             let mut out = load(tx, tenant_id, Some(office_id)).await?;
             // 今書いた営業所は必ず在る (同じ transaction の中)
             Ok(Saved::Done(out.offices.remove(0)))
