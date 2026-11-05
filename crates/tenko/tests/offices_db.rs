@@ -650,7 +650,7 @@ async fn offices_devices() {
     assert_eq!(ids(&a), json!(["AA:11_x", "dev-a", "dev-b"]));
     let a_id = a["id"].as_str().unwrap().to_owned();
 
-    // 別の営業所へ移る (A からは外れる)。省略した PUT は空に置き換える
+    // 端末は複数の営業所に所属できる (A からは外れない。同じ建物の別の会社の営業所が 1 台を共用する)。省略した PUT は空に置き換える
     let b = call(
         &app,
         "POST",
@@ -663,9 +663,12 @@ async fn offices_devices() {
     let b_id = b["id"].as_str().unwrap().to_owned();
     assert_eq!(ids(&b), json!(["dev-a"]));
     let list = call(&app, "GET", PATH, Some(t), None).await.json();
-    assert_eq!(ids(&list["offices"][0]), json!(["AA:11_x", "dev-b"]));
+    assert_eq!(
+        ids(&list["offices"][0]),
+        json!(["AA:11_x", "dev-a", "dev-b"])
+    );
     assert_eq!(ids(&list["offices"][1]), json!(["dev-a"]));
-    assert_eq!(count("tenko_office_devices", t).await, 3);
+    assert_eq!(count("tenko_office_devices", t).await, 4);
 
     // 検査 (外れたら何も書かない)。形・長さ・件数
     let many: Vec<String> = (0..1001).map(|i| format!("d{i}")).collect();
@@ -687,7 +690,7 @@ async fn offices_devices() {
         .await;
         assert_eq!((got.status, got.json()), (400, json!({ "error": word })));
     }
-    assert_eq!(count("tenko_office_devices", t).await, 3);
+    assert_eq!(count("tenko_office_devices", t).await, 4);
     let ok64 = "a".repeat(64);
     let put = call(
         &app,
@@ -707,7 +710,7 @@ async fn offices_devices() {
     )
     .await;
     assert_eq!(ids(&put.json()), json!([]));
-    assert_eq!(count("tenko_office_devices", t).await, 2);
+    assert_eq!(count("tenko_office_devices", t).await, 3);
 
     // 他のテナントの行は見えず、同じ端末の id も別に持てる。営業所を消すと所属も消える
     let theirs = call(
@@ -720,7 +723,10 @@ async fn offices_devices() {
     .await;
     assert_eq!(ids(&theirs.json()), json!(["dev-b"]));
     let list = call(&app, "GET", PATH, Some(t), None).await.json();
-    assert_eq!(ids(&list["offices"][0]), json!(["AA:11_x", "dev-b"]));
+    assert_eq!(
+        ids(&list["offices"][0]),
+        json!(["AA:11_x", "dev-a", "dev-b"])
+    );
     assert_eq!(
         call(&app, "DELETE", &format!("{PATH}/{a_id}"), Some(t), None)
             .await
