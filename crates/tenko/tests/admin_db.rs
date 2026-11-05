@@ -314,7 +314,7 @@ async fn failures_crud_and_csv() {
     assert_eq!(lines[0], "id,failure_type,description,affected_device,detected_at,detected_by,resolved_at,resolution_notes,session_id");
     assert_eq!(lines.len(), 2);
     assert!(lines[1].contains(",kiosk_offline,落ちた,kiosk-1,2026-10-01T00:00:00+00:00,管理,"));
-    assert!(lines[1].ends_with(",再起動,"));
+    assert!(lines[1].ends_with(",再起動 2,"));
 
     // dev の軸
     assert_eq!(
