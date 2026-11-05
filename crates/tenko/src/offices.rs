@@ -16,10 +16,10 @@
 //! 文字列は前後の空白を落とし、会社名・住所は空なら null。重複した id は 1 つにまとめる。
 //! `vehicle_ids` は営業所の車両の置き換え: 一覧に無い車両は所属を外し、一覧の車両はこの営業所へ付け替える (車両は 1 営業所だけ)。
 //!
-//! 権限は filing ([`crate::filing`]) とは違い、予定 ([`crate::schedules`]) の口と同じ (テナントのヘッダーだけ。
-//! auth-worker が役割を見て通す)。この表は dev の軸を持たない。
+//! **4 口とも admin だけ** (filing ([`crate::filing`]) と同じ判定。`X-User-Role` が admin でなければ 403 `{"error": "forbidden"}`)。
+//! 判定の点呼の方法がこの所属で決まるので、届出の設定と同じ強さにする。この表は dev の軸を持たない。
 
-use alc_core_wasm::TenantId;
+use alc_core_wasm::{AuthUser, TenantId};
 use alc_worker_db::{PgClient, TenantTx, TxOutput};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -32,6 +32,7 @@ use tokio_postgres::types::Type;
 use tokio_postgres::Error;
 use uuid::Uuid;
 
+use crate::filing::{error as status_error, is_admin};
 use crate::models::Arg;
 use crate::AppState;
 
@@ -352,6 +353,10 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+fn forbidden() -> Response {
+    status_error(StatusCode::FORBIDDEN, "forbidden")
+}
+
 fn error(word: &'static str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": word }))).into_response()
 }
@@ -359,12 +364,16 @@ fn error(word: &'static str) -> Response {
 async fn list_handler(
     State(state): State<AppState>,
     Extension(TenantId(tenant_id)): Extension<TenantId>,
-) -> Result<Json<OfficeList>, StatusCode> {
+    auth_user: Option<Extension<AuthUser>>,
+) -> Response {
+    if !is_admin(&auth_user) {
+        return forbidden();
+    }
     let mut pg = state.pg.lock().await;
-    list(&mut pg, tenant_id)
-        .await
-        .map(Json)
-        .map_err(|e| state.db_fail("offices list", &e))
+    match list(&mut pg, tenant_id).await {
+        Ok(l) => Json(l).into_response(),
+        Err(e) => state.db_fail("offices list", &e).into_response(),
+    }
 }
 
 /// 本文を検めて保存し、結果を応答にする (POST・PUT 共通。`created` なら 201)
@@ -389,32 +398,44 @@ async fn save_handler(state: AppState, tenant_id: Uuid, id: Option<Uuid>, body: 
 async fn create_handler(
     State(state): State<AppState>,
     Extension(TenantId(tenant_id)): Extension<TenantId>,
+    auth_user: Option<Extension<AuthUser>>,
     body: axum::body::Bytes,
 ) -> Response {
+    if !is_admin(&auth_user) {
+        return forbidden();
+    }
     save_handler(state, tenant_id, None, &body).await
 }
 
 async fn update_handler(
     State(state): State<AppState>,
     Extension(TenantId(tenant_id)): Extension<TenantId>,
+    auth_user: Option<Extension<AuthUser>>,
     Path(id): Path<Uuid>,
     body: axum::body::Bytes,
 ) -> Response {
+    if !is_admin(&auth_user) {
+        return forbidden();
+    }
     save_handler(state, tenant_id, Some(id), &body).await
 }
 
 async fn delete_handler(
     State(state): State<AppState>,
     Extension(TenantId(tenant_id)): Extension<TenantId>,
+    auth_user: Option<Extension<AuthUser>>,
     Path(id): Path<Uuid>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, Response> {
+    if !is_admin(&auth_user) {
+        return Err(forbidden());
+    }
     let mut pg = state.pg.lock().await;
     let deleted = delete(&mut pg, tenant_id, id)
         .await
-        .map_err(|e| state.db_fail("offices delete", &e))?;
+        .map_err(|e| state.db_fail("offices delete", &e).into_response())?;
     if deleted {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(StatusCode::NOT_FOUND)
+        Err(StatusCode::NOT_FOUND.into_response())
     }
 }

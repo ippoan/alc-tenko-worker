@@ -4,12 +4,47 @@ mod support;
 
 use serde_json::{json, Value};
 use support::{
-    admin, app, assert_logs_clean, broken_client, build, call, client_as, employee, tenant,
+    admin, app, assert_logs_clean, broken_client, build, call_with, client_as, employee, tenant,
     READ_ONLY_ROLE,
 };
 use uuid::Uuid;
 
 const PATH: &str = "/api/tenko/offices";
+
+fn as_role(role: &str) -> [(&'static str, String); 3] {
+    [
+        ("X-User-ID", Uuid::new_v4().to_string()),
+        ("X-User-Email", "offices-test@example.com".to_owned()),
+        ("X-User-Role", role.to_owned()),
+    ]
+}
+
+/// 役割つきで打つ
+async fn call_role(
+    app: &support::App,
+    role: &str,
+    method: &str,
+    uri: &str,
+    tenant: Uuid,
+    body: Option<Value>,
+) -> support::Got {
+    let h = as_role(role);
+    let headers: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    call_with(app, method, uri, Some(tenant), &headers, body).await
+}
+
+/// admin として打つ (この口は admin だけ)
+async fn call(
+    app: &support::App,
+    method: &str,
+    uri: &str,
+    tenant: Option<Uuid>,
+    body: Option<Value>,
+) -> support::Got {
+    let h = as_role("admin");
+    let headers: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    call_with(app, method, uri, tenant, &headers, body).await
+}
 
 /// 役割 (employees.role は TEXT[]) を付けた社員
 async fn staff(tenant: Uuid, name: &str, roles: &[&str], deleted: bool) -> Uuid {
@@ -94,6 +129,26 @@ async fn offices_crud() {
     let v3 = vehicle(t, "架空 100 あ 3", None, false).await;
     let gone = vehicle(t, "架空 100 あ 9", None, true).await;
     let foreign_v = vehicle(other, "架空 200 い 1", None, false).await;
+
+    // admin 以外 (admin でない役割・役割の無い要求) は 4 口とも 403 で、何も書かない
+    let one = format!("{PATH}/{}", Uuid::new_v4());
+    for (method, path, body) in [
+        ("GET", PATH, None),
+        ("POST", PATH, Some(json!({ "name": "書かれない" }))),
+        ("PUT", one.as_str(), Some(json!({ "name": "書かれない" }))),
+        ("DELETE", one.as_str(), None),
+    ] {
+        for got in [
+            call_role(&app, "viewer", method, path, t, body.clone()).await,
+            call_with(&app, method, path, Some(t), &[], body.clone()).await,
+        ] {
+            assert_eq!(
+                (got.status, got.json()),
+                (403, json!({ "error": "forbidden" }))
+            );
+        }
+    }
+    assert_eq!(count("tenko_offices", t).await, 0);
 
     // 何も無ければ空の営業所と、未削除の車両 (車両番号順)
     let got = call(&app, "GET", PATH, Some(t), None).await;
