@@ -12,7 +12,8 @@
 //! "carins_bases": [{"use_base", "user_name"}]}`。`carins_bases` は車検証の「使用の本拠の位置」+「使用者の氏名又は名称」の組で、
 //! 組ごとに営業所を 1 つ選ぶ (車両の所属は基本これで決まり、`vehicle_ids` で手で選んだ車両は例外の上書き)。組は 1 営業所なので別の営業所から移る。
 //! `device_ids` は営業所に所属する点呼端末 (auth-worker の端末の鍵の登録簿の id。`^[A-Za-z0-9:_-]{1,64}$`、登録簿に在るかは検査しない。
-//! 1 台 1 営業所で別の営業所から移る。キオスクの車両の候補の並びだけに使い、判定には使わない)。
+//! 1 台を複数の営業所に所属させられる (同じ建物の別の会社の営業所が共用する。migration 208)。キオスクの車両の候補の並びだけに使い、
+//! 判定には使わない)。
 //! GET の応答にはさらに `"carins_bases": [{"use_base", "user_name", "office_id", "vehicle_count"}]` (car_inspection に出てくる組の全部。
 //! 使用の本拠が空の組は除く。`vehicle_count` は組ごとの distinct CarId、`office_id` は対応が無ければ null。車検証が空のテナントは空配列)。
 //! `company_name` が null なら自社、値があればグループ企業の営業所。
@@ -221,11 +222,11 @@ pub mod sql {
     pub const CLEAR_DEVICES: &str =
         "DELETE FROM alc_api.tenko_office_devices WHERE tenant_id = $1 AND office_id = $2";
 
-    /// 端末をこの営業所に所属させる (別の営業所に在った端末は付け替える)。$1 tenant_id / $2 office_id / $3 device_id の配列
+    /// 端末をこの営業所に所属させる (別の営業所の所属はそのまま。直前に外しているので重なりは無い)。
+    /// $1 tenant_id / $2 office_id / $3 device_id の配列
     pub const ADD_DEVICES: &str =
         "INSERT INTO alc_api.tenko_office_devices (tenant_id, office_id, device_id) \
-         SELECT $1, $2, unnest($3::text[]) \
-         ON CONFLICT (tenant_id, device_id) DO UPDATE SET office_id = EXCLUDED.office_id";
+         SELECT $1, $2, unnest($3::text[]) ON CONFLICT DO NOTHING";
 
     /// 車検証に出てくる組と、組ごとの車両数 (distinct CarId) と対応。組の式は判定 (alc-measurements-worker) と同じ。
     /// 使用の本拠が空の組は除く。$1 tenant_id
