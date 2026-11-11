@@ -74,3 +74,8 @@ path = "crates/tenko/src/filing.rs"
 # 点呼の営業所と、運行管理者・車両の所属 (tests/offices_db.rs)
 [[files]]
 path = "crates/tenko/src/offices.rs"
+
+# 点呼の異常のメール (宛先の SQL・件名と本文・送信。tests/mail_db.rs と tests/overdue_db.rs が偽物の送り手で通す。
+# worker の送り手 src/mail.rs は wasm 専用で対象外。Refs ippoan/alc-app#676)
+[[files]]
+path = "crates/tenko/src/mail.rs"

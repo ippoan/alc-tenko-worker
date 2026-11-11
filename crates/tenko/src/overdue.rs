@@ -1,14 +1,17 @@
 //! 予定超過の確認 (W7c、Refs ippoan/rust-alc-api#680)。rust の `alc-tenko` の overdue.rs・repo/overdue.rs と、
 //! `src/main.rs` の 60 秒のループの写し。worker は Cron Trigger (毎分、本番だけ) の `scheduled` から [`run`] を呼ぶ。
 //!
-//! - 送り先の設定 (`tenko_overdue` の有効な webhook) が在るテナントを、SECURITY DEFINER の関数
-//!   `list_tenko_overdue_webhook_configs()` で横断して引く (nil のテナントの transaction。rust と同じ関数)
+//! - 未通知の超過した予定を持つテナントを、SECURITY DEFINER の関数 `list_tenko_overdue_tenants()` (migration 212) で
+//!   横断して引く (nil のテナントの transaction)。**webhook の設定の有無は見ない** (設定の無いテナントにもメールで知らせる。
+//!   Refs ippoan/alc-app#676。rust は送り先の設定が在るテナントだけを `list_tenko_overdue_webhook_configs()` で引いていた)
 //! - テナントごとに、未通知で、予定の時刻から **そのテナントの分数** (`tenko_settings.overdue_minutes`。行が無ければ
 //!   [`DEFAULT_OVERDUE_MINUTES`]) を過ぎても点呼が完了していない予定に **通知済みの印を先に付け** ([`sql::CLAIM`])、
 //!   印を付けられた行だけを送る。「完了していない」= 未消費、または消費したセッションの status が `completed`・`cancelled` 以外
 //!   (中断・判定待ち・途中も含む。自動点呼機器の認定要件の予定超過の確認)。本文の `data` にそのセッションの
 //!   `session_id`・`session_status` (未消費は null) を載せる
-//! - 送るのは W7b の [`crate::deliver::deliver`] (署名・再送・配信の記録)。送り終えるまで待つ
+//! - 印を付けた予定ごとに、notify のグループ「点呼の異常」へメール ([`crate::mail::notify`]。宛先はテナントごとに 1 回引く) と、
+//!   W7b の [`crate::deliver::deliver`] (署名・再送・配信の記録。webhook の設定が無ければ何もしない) で送る。送り終えるまで待つ。
+//!   印は送り先の有無にかかわらず付ける (後でグループや webhook を作っても、過去の超過をまとめて送らない)
 //!
 //! rust との違い:
 //! - rust は「読む → 送る中身を作る → 印を付ける → 送る」の順で、2 つの実行が重なると同じ予定を 2 回送りうる。
@@ -33,6 +36,7 @@ use tokio_postgres::Error;
 use uuid::Uuid;
 
 use crate::deliver::{deliver, Event, Sender};
+use crate::mail::{notify, SharedMailer};
 use crate::LogSink;
 
 /// 設定の行が無いテナントの、予定の時刻から何分過ぎたら超過とするか (rust の `TENKO_OVERDUE_MINUTES` の既定値)
@@ -45,9 +49,9 @@ pub mod sql {
     use super::DEFAULT_OVERDUE_MINUTES;
     use const_format::concatcp;
 
-    /// 送り先の設定が在るテナント (全テナントの横断。SECURITY DEFINER の関数、migration 158)
-    pub const LIST_TENANTS: &str =
-        "SELECT DISTINCT tenant_id FROM alc_api.list_tenko_overdue_webhook_configs()";
+    /// 未通知の超過した予定を持つテナント (全テナントの横断。SECURITY DEFINER の関数、migration 212。
+    /// 条件は [`IS_OVERDUE`] と同じ。webhook の設定の有無は見ない)
+    pub const LIST_TENANTS: &str = "SELECT t FROM alc_api.list_tenko_overdue_tenants() AS t";
 
     /// 予定を消費したセッションの status (消費していなければ NULL)。予定の別名は `s`
     pub const SESSION_STATUS: &str = "(SELECT ss.status FROM alc_api.tenko_sessions ss \
@@ -96,7 +100,7 @@ pub struct Overdue {
 
 impl TxOutput for Overdue {}
 
-/// 送り先の設定が在るテナント
+/// 未通知の超過した予定を持つテナント
 pub async fn tenants(pg: &mut PgClient) -> Result<Vec<Uuid>, Error> {
     pg.tenant_tx(Uuid::nil(), |tx| {
         Box::pin(async move {
@@ -153,8 +157,15 @@ pub fn payload(tenant_id: Uuid, s: &Overdue, now_ms: i64) -> Value {
     })
 }
 
-/// 1 回の確認 (Cron から毎分)。テナントごとに印を付けて送る。DB の失敗は固定の語でログに出し、次へ進む
-pub async fn run(pg: Arc<Mutex<PgClient>>, sender: Sender, log: LogSink, now_ms: i64) {
+/// 1 回の確認 (Cron から毎分)。テナントごとに印を付けて、メール (`mailer`) と webhook で送る。
+/// DB の失敗は固定の語でログに出し、次へ進む
+pub async fn run(
+    pg: Arc<Mutex<PgClient>>,
+    sender: Sender,
+    mailer: Option<SharedMailer>,
+    log: LogSink,
+    now_ms: i64,
+) {
     let list = {
         let mut c = pg.lock().await;
         tenants(&mut c).await
@@ -162,7 +173,7 @@ pub async fn run(pg: Arc<Mutex<PgClient>>, sender: Sender, log: LogSink, now_ms:
     let list = match list {
         Ok(l) => l,
         Err(e) => {
-            log(&format!("tenko: overdue configs failed: db ({})", kind(&e)));
+            log(&format!("tenko: overdue tenants failed: db ({})", kind(&e)));
             return;
         }
     };
@@ -178,8 +189,13 @@ pub async fn run(pg: Arc<Mutex<PgClient>>, sender: Sender, log: LogSink, now_ms:
                 continue;
             }
         };
-        for s in &claimed {
-            let event = Event::new(EVENT, payload(tenant_id, s, now_ms));
+        let events: Vec<Event> = claimed
+            .iter()
+            .map(|s| Event::new(EVENT, payload(tenant_id, s, now_ms)))
+            .collect();
+        // メールを先に (webhook は再送の待ちで長くかかりうる)
+        notify(&pg, mailer.as_ref(), &log, tenant_id, &events).await;
+        for event in events {
             deliver(&pg, &sender, &log, tenant_id, event).await;
         }
     }
