@@ -45,6 +45,17 @@ crons = ["* * * * *"]
 binding = "TENKO_HYPERDRIVE"
 id = "6bdf446634034f989d4e094d5510b162"
 
+# 点呼の異常のメール (中断・日常点検の NG・遅延を notify のグループ「点呼の異常」へ。src/mail.rs、crates/tenko の mail。
+# Refs ippoan/alc-app#676)。送れるのは Cloudflare アカウントで確認済みの送り先だけ。**destination_address は書かない**
+# (書くと 1 人にしか送れない。ippoan/alc-measurements-worker のアルコール検知メールと同じ)。
+# binding は env に継承されないので、staging は下で別に書く
+[[send_email]]
+name = "ANOMALY_EMAIL"
+
+# 差出人 (ippoan/alc-measurements-worker と同じ)。env に継承されないので staging は下で別に書く
+[vars]
+NOTIFY_EMAIL_FROM = "alc-alert@ippoan.org"
+
 # staging: DB は ippoan/alc-vein-worker の staging と同じもの (Workers VPC の binding TENKO_DB_VPC から
 # 既存の Tunnel 経由で PgBouncer へ繋ぐ。src/db.rs)。Hyperdrive は通さない。
 [env.staging]
@@ -74,6 +85,13 @@ remote = true
 # 予定超過の確認は本番だけ (トップレベルの triggers を継承させない)
 [env.staging.triggers]
 crons = []
+
+# 点呼の異常のメール。トップレベルと同じ binding と差出人 (destination_address は書かない)
+[[env.staging.send_email]]
+name = "ANOMALY_EMAIL"
+
+[env.staging.vars]
+NOTIFY_EMAIL_FROM = "alc-alert@ippoan.org"
 
 # ローカル (`wrangler dev --env local`) 専用。deploy しない。
 # binding を持たない (binding は env に継承されない) ので、src/db.rs は文字列 DATABASE_URL の段で繋ぐ

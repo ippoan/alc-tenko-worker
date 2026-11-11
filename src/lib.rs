@@ -11,6 +11,7 @@
 #![cfg(target_arch = "wasm32")]
 
 mod db;
+mod mail;
 mod tcp;
 mod webhook;
 
@@ -18,8 +19,10 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{HeaderValue, Response, StatusCode};
+use futures_util::future::join;
 use futures_util::lock::Mutex;
 use tenko::deliver::{deliver_all, Outbox, Sender};
+use tenko::mail::{notify_all, SharedMailer};
 use tenko::overdue;
 use tenko::{router, AppState, LogSink};
 use tower_service::Service;
@@ -27,6 +30,21 @@ use worker::{
     console_error, event, Context, Env, HttpRequest, Result, ScheduleContext, ScheduledEvent,
     WorkerVersionMetadata,
 };
+
+/// 点呼の異常のメールの `send_email` の binding (wrangler.toml の `[[send_email]]`。トップと staging の両方に在る) と、
+/// 差出人の変数。どちらかが無ければメールは送らない (ほかは動く。Refs ippoan/alc-app#676)
+const ANOMALY_EMAIL_BINDING: &str = "ANOMALY_EMAIL";
+const NOTIFY_EMAIL_FROM_VAR: &str = "NOTIFY_EMAIL_FROM";
+
+/// 送り手を作る。binding が無い・差出人が未設定なら `None`
+fn anomaly_mailer(env: &Env) -> Option<SharedMailer> {
+    let binding = env.send_email(ANOMALY_EMAIL_BINDING).ok()?;
+    let from = env.var(NOTIFY_EMAIL_FROM_VAR).ok()?.to_string();
+    if from.is_empty() {
+        return None;
+    }
+    Some(Arc::new(mail::EmailSender::new(binding, from)))
+}
 
 fn log_sink() -> LogSink {
     Arc::new(|message| console_error!("{message}"))
@@ -71,14 +89,25 @@ async fn fetch(req: HttpRequest, env: Env, ctx: Context) -> Result<Response<Body
         Ok(r) => r,
         Err(e) => match e {},
     };
-    // 点呼の節目の webhook は応答の後で送り切る (fire-and-forget の spawn はしない。rust は tokio::spawn だった)
+    // 点呼の節目の webhook は応答の後で送り切る (fire-and-forget の spawn はしない。rust は tokio::spawn だった)。
+    // 中断・日常点検の NG は、同じ控えから notify のグループ「点呼の異常」へのメールも並べて送る (webhook の再送の待ちに
+    // メールを後ろへ並べない。pg の lock はそれぞれ DB を読み書きする間だけ持つ)
     let events = outbox.take();
     if !events.is_empty() {
         let sender = Sender {
             http: Arc::new(webhook::WorkerHttp),
             sleeper: Arc::new(webhook::WorkerSleeper),
         };
-        ctx.wait_until(deliver_all(pg, sender, log_sink(), events));
+        let mailer = anomaly_mailer(&env);
+        let log = log_sink();
+        ctx.wait_until(async move {
+            let mails = notify_all(&pg, mailer.as_ref(), &log, &events);
+            join(
+                mails,
+                deliver_all(pg.clone(), sender, log.clone(), events.clone()),
+            )
+            .await;
+        });
     }
     // どの版が応えたかを応答ヘッダーで分かるようにする。binding が取れなければ何も付けない
     if let Ok(meta) = env.get_binding::<WorkerVersionMetadata>("CF_VERSION_METADATA") {
@@ -95,7 +124,8 @@ async fn fetch(req: HttpRequest, env: Env, ctx: Context) -> Result<Response<Body
     Ok(resp)
 }
 
-/// 予定超過の確認 (wrangler.toml の `[triggers]` = 毎分、本番だけ)。中身は crates/tenko の `overdue::run`。
+/// 予定超過の確認 (wrangler.toml の `[triggers]` = 毎分、本番だけ)。中身は crates/tenko の `overdue::run`
+/// (webhook と、notify のグループ「点呼の異常」へのメール)。
 /// 送り終えるまで待つ (rust は Cloud Run の中の 60 秒のループだった)
 #[event(scheduled)]
 async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
@@ -111,5 +141,12 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         sleeper: Arc::new(webhook::WorkerSleeper),
     };
     let now = worker::Date::now().as_millis() as i64;
-    overdue::run(Arc::new(Mutex::new(pg)), sender, log_sink(), now).await;
+    overdue::run(
+        Arc::new(Mutex::new(pg)),
+        sender,
+        anomaly_mailer(&env),
+        log_sink(),
+        now,
+    )
+    .await;
 }

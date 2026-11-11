@@ -8,8 +8,12 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use futures_util::future::BoxFuture;
 use futures_util::lock::Mutex;
 use serde_json::{json, Value};
-use support::{admin, broken_client, client_as, employee, rt_client, tenant, READ_ONLY_ROLE};
+use support::{
+    admin, broken_client, client_as, employee, notify_group, notify_member, rt_client, tenant,
+    FakeMailer, READ_ONLY_ROLE,
+};
 use tenko::deliver::{HttpResult, Sender, Sleeper, WebhookHttp};
+use tenko::mail::{SharedMailer, GROUP};
 use tenko::overdue::run;
 use uuid::Uuid;
 
@@ -77,6 +81,27 @@ fn sender(http: Arc<FakeHttp>) -> Sender {
 }
 
 type Logs = Arc<StdMutex<Vec<String>>>;
+
+fn mailer(m: &Arc<FakeMailer>) -> Option<SharedMailer> {
+    Some(m.clone())
+}
+
+/// `run` は全テナント (ほかのテストの binary が作った超過の予定も) を回るので、ほかのテナントのメールの見送りの
+/// ログが混ざりうる。それ以外のログが無いこと
+fn only_mail_skips(logs: &Logs) -> bool {
+    logs.lock()
+        .unwrap()
+        .iter()
+        .all(|l| l.starts_with("tenko: anomaly mail skipped: no "))
+}
+
+/// グループ「点呼の異常」に宛先を 1 人入れ、その email を返す
+async fn mail_to(t: Uuid) -> String {
+    let g = notify_group(t, GROUP).await;
+    let to = format!("kanri-{t}@example.invalid");
+    notify_member(t, g, Some(&to), true).await;
+    to
+}
 
 fn sink(logs: &Logs) -> tenko::LogSink {
     let l = logs.clone();
@@ -154,8 +179,9 @@ async fn deliveries(config: Uuid) -> Vec<(i32, bool)> {
         .collect()
 }
 
-/// 超過した予定だけに印を付けて送る。未超過・消費済み・通知済み・dev の行・設定の無い / 無効なテナントは送らない。
-/// 2 回目は何も送らない (印を先に付けるので 1 回だけ)
+/// 超過した予定だけに印を付けて送る。未超過・消費済み・通知済み・dev の行は送らない。webhook の設定の無い / 無効な
+/// テナントにも印は付け、webhook は送らずメールだけ送る (Refs ippoan/alc-app#676)。
+/// 2 回目は何も送らない (印を先に付けるので、webhook もメールも 1 回だけ)
 #[tokio::test]
 async fn overdue_schedules_are_claimed_and_sent_once() {
     let _serial = serial().lock().await;
@@ -174,12 +200,22 @@ async fn overdue_schedules_are_claimed_and_sent_once() {
     let other = schedule(no_config, e2, "2 hours", false, false, false).await;
     let e3 = employee(disabled, "無効 設定").await;
     let off = schedule(disabled, e3, "2 hours", false, false, false).await;
+    let to_t = mail_to(t).await;
+    let to_no_config = mail_to(no_config).await;
 
     let pg = Arc::new(Mutex::new(rt_client().await));
     let http = Arc::new(FakeHttp::default());
+    let mails = Arc::new(FakeMailer::default());
     let logs: Logs = Arc::default();
     let now = now_ms();
-    run(pg.clone(), sender(http.clone()), sink(&logs), now).await;
+    run(
+        pg.clone(),
+        sender(http.clone()),
+        mailer(&mails),
+        sink(&logs),
+        now,
+    )
+    .await;
 
     let sent = http.sent_for(t);
     assert_eq!(sent.len(), 1);
@@ -197,15 +233,43 @@ async fn overdue_schedules_are_claimed_and_sent_once() {
     let minutes = p["data"]["minutes_overdue"].as_i64().unwrap();
     assert!((119..=121).contains(&minutes), "{minutes}");
     assert!(notified(late).await);
-    for id in [soon, done, dev, other, off] {
+    for id in [soon, done, dev] {
         assert!(!notified(id).await);
     }
-    assert!(notified(already).await);
+    for id in [already, other, off] {
+        assert!(notified(id).await);
+    }
     assert_eq!(deliveries(cfg).await, vec![(1, true)]);
+    // webhook の設定が無い・無効なテナントには webhook を送らない
+    assert!(http.sent_for(no_config).is_empty());
+    assert!(http.sent_for(disabled).is_empty());
+    // メールは超過した予定ごとに 1 通 (設定の無いテナントにも)。グループの無いテナント (disabled) には送らない
+    for to in [&to_t, &to_no_config] {
+        let sent = mails.sent_to(to);
+        assert_eq!(sent.len(), 1, "{to}");
+        assert_eq!(
+            sent[0].subject,
+            "【点呼の異常】点呼が予定の時刻を過ぎても完了していません"
+        );
+    }
+    assert!(mails.sent_to(&to_t)[0].body.contains("乗務員: 超過 一郎\n"));
+    assert!(mails.sent_to(&to_t)[0]
+        .body
+        .contains("点呼の種類: 乗務後\n"));
+    assert!(mails.sent_to(&to_t)[0]
+        .body
+        .contains("運行管理者: 運行 管理者\n"));
 
-    run(pg, sender(http.clone()), sink(&logs), now).await;
+    run(pg, sender(http.clone()), mailer(&mails), sink(&logs), now).await;
     assert_eq!(http.sent_for(t).len(), 1);
-    assert!(logs.lock().unwrap().is_empty());
+    assert_eq!(mails.sent_to(&to_t).len(), 1);
+    assert_eq!(mails.sent_to(&to_no_config).len(), 1);
+    assert!(only_mail_skips(&logs));
+    assert!(logs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|l| l == "tenko: anomaly mail skipped: no group"));
 }
 
 /// 送るのに失敗しても印は残る (rust と同じく次の回に送り直さない)。毎回の失敗は配信の記録に残る
@@ -225,18 +289,33 @@ async fn failed_delivery_is_recorded_and_not_resent() {
         Ok((503, "down".into())),
     ];
     let logs: Logs = Arc::default();
-    run(pg.clone(), sender(http.clone()), sink(&logs), now_ms()).await;
+    let mails = Arc::new(FakeMailer::default());
+    run(
+        pg.clone(),
+        sender(http.clone()),
+        mailer(&mails),
+        sink(&logs),
+        now_ms(),
+    )
+    .await;
     assert_eq!(http.sent_for(t).len(), 3);
     assert_eq!(
         deliveries(cfg).await,
         vec![(1, false), (2, false), (3, false)]
     );
     assert!(notified(late).await);
-    run(pg, sender(http.clone()), sink(&logs), now_ms()).await;
+    run(
+        pg,
+        sender(http.clone()),
+        mailer(&mails),
+        sink(&logs),
+        now_ms(),
+    )
+    .await;
     assert_eq!(http.sent_for(t).len(), 3);
 }
 
-/// 設定を引けない → 固定の語でログに出して終わる。印を付けられない (更新の権限が無い) → ログに出して次のテナントへ
+/// テナントを引けない → 固定の語でログに出して終わる。印を付けられない (更新の権限が無い) → ログに出して次のテナントへ
 #[tokio::test]
 async fn db_failures_are_logged() {
     let _serial = serial().lock().await;
@@ -247,25 +326,41 @@ async fn db_failures_are_logged() {
 
     let logs: Logs = Arc::default();
     let http = Arc::new(FakeHttp::default());
+    let mails = Arc::new(FakeMailer::default());
     let broken = Arc::new(Mutex::new(broken_client().await));
-    run(broken, sender(http.clone()), sink(&logs), now_ms()).await;
-    assert!(logs.lock().unwrap()[0].starts_with("tenko: overdue configs failed: db ("));
+    run(
+        broken,
+        sender(http.clone()),
+        mailer(&mails),
+        sink(&logs),
+        now_ms(),
+    )
+    .await;
+    assert!(logs.lock().unwrap()[0].starts_with("tenko: overdue tenants failed: db ("));
 
     // 読み取り専用のロール: 関数は呼べる (このテストで付ける) が、予定を更新できない
     admin()
         .await
         .batch_execute(&format!(
-            "GRANT EXECUTE ON FUNCTION alc_api.list_tenko_overdue_webhook_configs() TO {READ_ONLY_ROLE}"
+            "GRANT EXECUTE ON FUNCTION alc_api.list_tenko_overdue_tenants() TO {READ_ONLY_ROLE}"
         ))
         .await
         .unwrap();
     let ro = Arc::new(Mutex::new(client_as(READ_ONLY_ROLE).await));
-    run(ro, sender(http.clone()), sink(&logs), now_ms()).await;
+    run(
+        ro,
+        sender(http.clone()),
+        mailer(&mails),
+        sink(&logs),
+        now_ms(),
+    )
+    .await;
     let logs = logs.lock().unwrap().clone();
     assert!(logs
         .iter()
         .any(|l| l.starts_with("tenko: overdue claim failed: db (")));
     assert!(http.sent.lock().unwrap().is_empty());
+    assert!(mails.sent.lock().unwrap().is_empty());
     assert!(!notified(late).await);
 }
 
@@ -329,7 +424,15 @@ async fn minutes_are_per_tenant_and_unfinished_sessions_count() {
     let pg = Arc::new(Mutex::new(rt_client().await));
     let http = Arc::new(FakeHttp::default());
     let logs: Logs = Arc::default();
-    run(pg, sender(http.clone()), sink(&logs), now_ms()).await;
+    let mails = Arc::new(FakeMailer::default());
+    run(
+        pg,
+        sender(http.clone()),
+        mailer(&mails),
+        sink(&logs),
+        now_ms(),
+    )
+    .await;
 
     for id in [
         short_late,
@@ -373,5 +476,5 @@ async fn minutes_are_per_tenant_and_unfinished_sessions_count() {
     for s in ["interrupted", "judgment_pending", "identity_verified"] {
         assert!(statuses.iter().any(|x| x == s), "{s}");
     }
-    assert!(logs.lock().unwrap().is_empty());
+    assert!(only_mail_skips(&logs));
 }

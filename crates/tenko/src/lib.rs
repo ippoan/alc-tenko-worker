@@ -19,6 +19,7 @@
 //! - [`filing`] — 点呼の届出・自動点呼機器の認定申請に差し込む値 (テナント 1 行。admin だけ)
 //! - [`offices`] — 点呼の営業所と、運行管理者・車両の所属 (自動点呼の判定で点呼の方法を決める。権限はテナントのヘッダーだけ)
 //! - [`fire`] — ほかの worker (測定の口) から点呼の節目の webhook を預かる口 (`/internal/webhooks/fire`。`/api` の外)
+//! - [`mail`] — 点呼の異常 (中断・日常点検の NG・遅延) を notify のグループ「点呼の異常」へメールで知らせる (Refs ippoan/alc-app#676)
 //!
 //! **点呼の電話のアプリの口 (`/tenko-call/register`・`/tenko-call/tenko`) だけがテナントのヘッダーを要らない** (rust でも公開の口。
 //! テナントは点呼用の番号・電話番号から引く)。ほかは `X-Tenant-ID` を要る (auth-worker が付ける。無い・UUID でない → 401。
@@ -37,6 +38,7 @@ pub mod driver_info;
 pub mod failures;
 pub mod filing;
 pub mod fire;
+pub mod mail;
 pub mod models;
 pub mod offices;
 pub mod overdue;

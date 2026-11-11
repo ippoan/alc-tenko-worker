@@ -12,6 +12,10 @@
 //!
 //! 受ける種類は [`EVENT_TYPES`] の 4 つだけ。payload の `tenant_id` はヘッダーのテナントと同じでなければ 400
 //! (別のテナントの送り先へ本文を渡さない)。**dev端末の要求 (`X-Device-Dev: 1`) は 202 で受けて積まない** (段の口と同じ)。
+//!
+//! 積んだ控えのうち中断 (`tenko_interrupted`)・日常点検の NG (`inspection_ng`) は、webhook に加えて notify のグループ
+//! 「点呼の異常」へメールでも知らせる (worker が応答の後に [`crate::mail::notify_all`] で送る。Refs ippoan/alc-app#676)。
+//! tenant の一致と dev端末の除外を通ったものだけが積まれるので、dev端末の要求からはメールも送らない。
 
 use alc_core_wasm::{DeviceDevSlot, TenantId};
 use axum::extract::State;

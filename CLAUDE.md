@@ -46,10 +46,14 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   種類は `EVENT_TYPES` の 4 つ、payload の `tenant_id` はヘッダーのテナントと一致 (でなければ 400)、dev端末の要求は積まない。
   積んだ控え (`outbox`) を応答の後の `deliver_all` で送る。
 - **予定超過の確認** (`overdue.rs`、W7c): `src/lib.rs` の `scheduled` (wrangler.toml の `[triggers]` = 毎分、**本番だけ**。triggers は env に
-  継承されるので env.staging / env.local は `crons = []`、check-exposure.sh が検査) から `overdue::run`。送り先の設定の在るテナントを
+  継承されるので env.staging / env.local は `crons = []`、check-exposure.sh が検査) から `overdue::run`。未通知の超過した予定を持つテナントを
   SECURITY DEFINER の関数で引き、**通知済みの印を先に付ける UPDATE** (`sql::CLAIM`) が返した予定だけを `deliver` で送る (2 つの実行が
   重なっても 1 回だけ。rust は読む → 印 → 送るで重なると 2 回送りえた)。超過 = 時刻 + テナントの分数 を過ぎても点呼が完了していない (未消費、または消費したセッションが completed・cancelled 以外)。分数は CLAIM の中で引く。dev の軸は立てない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 11・admin_db 3・call_db 2・deliver_db 2・failures_db 1・filing_db 2・fire_db 2・offices_db 6・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
+- **点呼の異常のメール** (`mail.rs`、Refs ippoan/alc-app#676): 中断・日常点検の NG (fire の控え。worker が応答の後に `notify_all`) と
+  遅延 (`overdue::run` が CLAIM で印を付けた予定だけ) を、notify のグループ「点呼の異常」の宛先へ 1 人 1 通。送り手は `send_email` の
+  binding `ANOMALY_EMAIL` (destination_address 無し) と変数 `NOTIFY_EMAIL_FROM` (`src/mail.rs`)。遅延のテナントは
+  `list_tenko_overdue_tenants()` (migration 212。webhook の設定の有無を見ない) で引く。ログは固定の語だけ。
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 16・admin_db 3・call_db 2・deliver_db 2・failures_db 1・filing_db 2・fire_db 2・mail_db 3・offices_db 6・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。

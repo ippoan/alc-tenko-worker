@@ -465,3 +465,77 @@ pub async fn record(
         .unwrap();
     id
 }
+
+/// notify のグループを 1 つ作る (superuser で)
+pub async fn notify_group(tenant: Uuid, name: &str) -> Uuid {
+    admin()
+        .await
+        .query_one(
+            "INSERT INTO alc_api.notify_groups (tenant_id, name) VALUES ($1, $2) RETURNING id",
+            &[&tenant, &name],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// 宛先を 1 人作ってグループに入れる (superuser で)
+pub async fn notify_member(tenant: Uuid, group: Uuid, email: Option<&str>, enabled: bool) {
+    let admin = admin().await;
+    let id: Uuid = admin
+        .query_one(
+            "INSERT INTO alc_api.notify_recipients \
+                 (tenant_id, name, provider, lineworks_user_id, email, enabled) \
+             VALUES ($1, '受信者', 'lineworks', $2, $3, $4) RETURNING id",
+            &[&tenant, &Uuid::new_v4().to_string(), &email, &enabled],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    admin
+        .execute(
+            "INSERT INTO alc_api.notify_recipient_groups (group_id, recipient_id) VALUES ($1, $2)",
+            &[&group, &id],
+        )
+        .await
+        .unwrap();
+}
+
+/// メールの偽物の送り手 (送ったものを控える。`fail` の宛先だけ失敗させる)
+#[derive(Default)]
+pub struct FakeMailer {
+    pub sent: StdMutex<Vec<tenko::mail::Mail>>,
+    pub fail: StdMutex<Vec<String>>,
+}
+
+impl FakeMailer {
+    /// `to` 宛に送ったもの
+    pub fn sent_to(&self, to: &str) -> Vec<tenko::mail::Mail> {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.to == to)
+            .cloned()
+            .collect()
+    }
+}
+
+impl tenko::mail::Mailer for FakeMailer {
+    fn send<'a>(
+        &'a self,
+        mail: &'a tenko::mail::Mail,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), tenko::mail::MailError>> {
+        let failed = self.fail.lock().unwrap().contains(&mail.to);
+        if !failed {
+            self.sent.lock().unwrap().push(mail.clone());
+        }
+        Box::pin(async move {
+            if failed {
+                Err(tenko::mail::MailError("send"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
