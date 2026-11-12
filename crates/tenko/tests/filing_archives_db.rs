@@ -310,7 +310,7 @@ async fn archives_save_list_get() {
         &[("name", "other.zip")],
     );
 
-    // 一覧は saved_at の新しい順 (同じ時刻は id の大きい順)。形の違うキーと別のテナントは出ない
+    // 一覧は saved_at の新しい順 (同じ時刻は id の文字列の大きい順)。形の違うキーと別のテナントは出ない
     let got = get(&app, t, PATH).await;
     assert_eq!(got.status, 200);
     let list = got.json();
@@ -320,7 +320,7 @@ async fn archives_save_list_get() {
         .iter()
         .map(|a| a["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, [ARRIVE, ARRIVE2, old, bare]);
+    assert_eq!(ids, [ARRIVE2, ARRIVE, old, bare]);
     assert_eq!(
         list[3],
         json!({ "id": bare, "name": format!("{bare}.zip"), "size": 4, "saved_at": "", "saved_by": null, "meta": null })
