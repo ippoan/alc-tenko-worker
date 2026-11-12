@@ -357,7 +357,7 @@ async fn offices_crud() {
     assert_eq!(
         a,
         json!({
-            "id": a_id, "name": "架空運輸 本社", "company_name": null, "address": null,
+            "id": a_id, "name": "架空運輸 本社", "company_name": null, "company_id": null, "address": null,
             "manager_ids": [m2], "vehicle_ids": [v3], "carins_bases": [], "device_ids": []
         })
     );
@@ -482,6 +482,125 @@ async fn offices_crud() {
         .await
         .unwrap();
     assert_eq!(count("tenko_office_managers", t).await, 0);
+    assert!(app.logs().is_empty());
+}
+
+/// その事業者を 1 件作る
+async fn company(tenant: Uuid, name: &str) -> Uuid {
+    admin()
+        .await
+        .query_one(
+            "INSERT INTO alc_api.tenko_companies (tenant_id, name) VALUES ($1, $2) RETURNING id",
+            &[&tenant, &name],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+#[tokio::test]
+async fn offices_company() {
+    let app = app().await;
+    let t = tenant().await;
+    let other = tenant().await;
+    let c1 = company(t, "架空運輸株式会社").await;
+    let c2 = company(t, "架空グループ株式会社").await;
+    let foreign = company(other, "他社の事業者").await;
+
+    // company_id を付けて作る (応答にも一覧にも出る。company_name は別の欄のまま)
+    let post = call(
+        &app,
+        "POST",
+        PATH,
+        Some(t),
+        Some(json!({ "name": "架空 第一営業所", "company_name": "旧い会社名", "company_id": c1 })),
+    )
+    .await;
+    assert_eq!(post.status, 201);
+    let a = post.json();
+    assert_eq!(a["company_id"], json!(c1));
+    assert_eq!(a["company_name"], "旧い会社名");
+    let a_id = a["id"].as_str().unwrap().to_owned();
+
+    // 省略は null
+    let post = call(
+        &app,
+        "POST",
+        PATH,
+        Some(t),
+        Some(json!({ "name": "架空 第二営業所" })),
+    )
+    .await;
+    assert_eq!(post.status, 201);
+    assert_eq!(post.json()["company_id"], json!(null));
+    let b_id = post.json()["id"].as_str().unwrap().to_owned();
+
+    let list = call(&app, "GET", PATH, Some(t), None).await.json();
+    assert_eq!(list["offices"][0]["company_id"], json!(c1));
+    assert_eq!(list["offices"][1]["company_id"], json!(null));
+
+    // PUT で付け替える
+    let put = call(
+        &app,
+        "PUT",
+        &format!("{PATH}/{a_id}"),
+        Some(t),
+        Some(json!({ "name": "架空 第一営業所", "company_id": c2 })),
+    )
+    .await;
+    assert_eq!(put.status, 200);
+    assert_eq!(put.json()["company_id"], json!(c2));
+
+    // PUT で省略すると null に戻る
+    let put = call(
+        &app,
+        "PUT",
+        &format!("{PATH}/{a_id}"),
+        Some(t),
+        Some(json!({ "name": "架空 第一営業所" })),
+    )
+    .await;
+    assert_eq!(put.status, 200);
+    assert_eq!(put.json()["company_id"], json!(null));
+
+    // 別テナントの事業者・無い事業者は 400 invalid_company で、何も書かない
+    let before = count("tenko_offices", t).await;
+    for bad in [foreign, Uuid::new_v4()] {
+        let body = json!({ "name": "書かれない", "company_id": bad });
+        let got = call(&app, "POST", PATH, Some(t), Some(body.clone())).await;
+        assert_eq!(
+            (got.status, got.json()),
+            (400, json!({ "error": "invalid_company" }))
+        );
+        let got = call(&app, "PUT", &format!("{PATH}/{b_id}"), Some(t), Some(body)).await;
+        assert_eq!(
+            (got.status, got.json()),
+            (400, json!({ "error": "invalid_company" }))
+        );
+    }
+    assert_eq!(count("tenko_offices", t).await, before);
+
+    // 事業者を消すと営業所の company_id は null になる
+    let put = call(
+        &app,
+        "PUT",
+        &format!("{PATH}/{b_id}"),
+        Some(t),
+        Some(json!({ "name": "架空 第二営業所", "company_id": c1 })),
+    )
+    .await;
+    assert_eq!(put.json()["company_id"], json!(c1));
+    admin()
+        .await
+        .execute("DELETE FROM alc_api.tenko_companies WHERE id = $1", &[&c1])
+        .await
+        .unwrap();
+    let list = call(&app, "GET", PATH, Some(t), None).await.json();
+    assert!(list["offices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|o| o["company_id"] == json!(null)));
     assert!(app.logs().is_empty());
 }
 

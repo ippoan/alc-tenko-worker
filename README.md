@@ -37,8 +37,8 @@ ippoan/alc-measurements-worker へ移した。Refs ippoan/rust-alc-api#680)
 | `/api/tenko/consignments` | GET・POST | 事業者間遠隔点呼の受委託 (admin だけ。委託の営業所 → 受託の営業所、`arrive_id`・`permit_no`・`permit_date`・`valid_from`・`valid_to`。`created_at` の順)。POST は 201 で 1 件。営業所がテナントに無い `invalid_office`・事業者が付いていない `office_without_company`・2 つの事業者が同じ `same_company`・到達番号の形 `invalid_arrive_id`・期間が片方だけ/逆順/5 年以上 `invalid_period`・許可番号 100 文字超 `too_long` |
 | `/api/tenko/consignments/{id}` | PUT・DELETE | 受委託の全部の置き換え (200)・削除 (204)。無ければ 404 |
 | `/api/tenko/filing-archives/{到達番号}` | GET・PUT | PUT は控えを到達番号で保存 (同じ到達番号は上書き)。本文は zip そのまま (先頭が `PK\x03\x04` でなければ 400 `not_zip`)、クエリの `name` (ファイル名を encodeURIComponent。任意・1〜200 文字・無ければ `{到達番号}.zip`) と `meta` (要約の JSON object を encodeURIComponent。任意・4000 文字まで。ヘッダーでは受けない = auth-worker の代理が転送しない) → 200 `{id, name, size, saved_at, saved_by, meta}`。到達番号の形 (16〜18 桁、末尾 1 字だけ英小文字可) でなければ 400 `invalid_arrive_id`・空は 400 `empty`・20 MiB を超えると 413 `too_large`。GET は zip (`Content-Disposition: attachment` で元のファイル名)。無い・形でなければ 404 |
-| `/api/tenko/offices` | GET・POST | 点呼の営業所 (運行管理者・車両の所属つき、4 口とも admin だけ)。GET は `{offices, vehicles, carins_bases}` (未削除の車両と、車検証の使用の本拠+使用者の組の一覧つき。組ごとに営業所を選ぶ。組の値は半角・全角の空白を取り除いて正規化。営業所は所属の点呼端末 `device_ids` つき)・POST は 201 で営業所 1 件 |
-| `/api/tenko/offices/{id}` | PUT・DELETE | 営業所の全部の置き換え (`manager_ids`・`vehicle_ids`・`carins_bases`・`device_ids` も。車両は別の営業所から移る)・削除 (204)。無ければ 404 |
+| `/api/tenko/offices` | GET・POST | 点呼の営業所 (運行管理者・車両の所属つき、4 口とも admin だけ)。GET は `{offices, vehicles, carins_bases}` (未削除の車両と、車検証の使用の本拠+使用者の組の一覧つき。組ごとに営業所を選ぶ。組の値は半角・全角の空白を取り除いて正規化。営業所は所属の点呼端末 `device_ids` と事業者 `company_id` (uuid か null) つき)・POST は 201 で営業所 1 件。本文の `company_id` は任意 (null・省略は null)、テナントに無い事業者は 400 `invalid_company` |
+| `/api/tenko/offices/{id}` | PUT・DELETE | 営業所の全部の置き換え (`manager_ids`・`vehicle_ids`・`carins_bases`・`device_ids` も。`company_id` も省略すると null に戻る。車両は別の営業所から移る)・削除 (204)。無ければ 404 |
 | `/api/tenko/dashboard` | GET | ダッシュボード (件数と予定超過) |
 | `/api/tenko/daily-health-status` | GET | 日々の健康状態 (`?date=`、省略は JST の今日) |
 | `/api/tenko/driver-info/{employee_id}` | GET | 乗務員情報 (点呼で見せる項目) |

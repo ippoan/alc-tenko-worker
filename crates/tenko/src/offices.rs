@@ -4,11 +4,11 @@
 //! この口はその所属を管理画面 (alc-app) から設定するためのもの。rust-alc-api には無い口。
 //!
 //! - `GET /tenko/offices` — `{"offices": [<営業所>], "vehicles": [<車両>]}`。営業所は名称順、車両は未削除を車両番号順
-//! - `POST /tenko/offices` — 本文 `{"name", "company_name"?, "address"?, "manager_ids"?, "vehicle_ids"?}` → 201 で営業所 1 件
-//! - `PUT /tenko/offices/{id}` — 同じ本文で全部置き換える (省略した `manager_ids`・`vehicle_ids` は空)。無ければ 404
+//! - `POST /tenko/offices` — 本文 `{"name", "company_name"?, "company_id"?, "address"?, "manager_ids"?, "vehicle_ids"?}` → 201 で営業所 1 件
+//! - `PUT /tenko/offices/{id}` — 同じ本文で全部置き換える (省略した `manager_ids`・`vehicle_ids` は空、`company_id` は null)。無ければ 404
 //! - `DELETE /tenko/offices/{id}` — 204。無ければ 404 (所属は表の外部キーで外れる)
 //!
-//! 営業所 1 件の形: `{"id", "name", "company_name", "address", "manager_ids": [社員の id], "vehicle_ids": [車両の id],
+//! 営業所 1 件の形: `{"id", "name", "company_name", "company_id", "address", "manager_ids": [社員の id], "vehicle_ids": [車両の id],
 //! "carins_bases": [{"use_base", "user_name"}]}`。`carins_bases` は車検証の「使用の本拠の位置」+「使用者の氏名又は名称」の組で、
 //! 組ごとに営業所を 1 つ選ぶ (車両の所属は基本これで決まり、`vehicle_ids` で手で選んだ車両は例外の上書き)。組は 1 営業所なので別の営業所から移る。
 //! `device_ids` は営業所に所属する点呼端末 (auth-worker の端末の鍵の登録簿の id。`^[A-Za-z0-9:_-]{1,64}$`、登録簿に在るかは検査しない。
@@ -18,10 +18,12 @@
 //! どれも同じ規則で、判定の alc-measurements-worker と同じ式)。保存では同じ組の既存の行 (別の営業所・空白入りの古い行も) を消してから入れる。
 //! GET の応答にはさらに `"carins_bases": [{"use_base", "user_name", "office_id", "vehicle_count"}]` (car_inspection に出てくる組の全部。
 //! 使用の本拠が空の組は除く。`office_id` は保存済みの対応のうち正規化して一致するもの (複数の営業所に分かれていたら office_id が最小の 1 つ)。`vehicle_count` は組ごとの distinct CarId、`office_id` は対応が無ければ null。車検証が空のテナントは空配列)。
-//! `company_name` が null なら自社、値があればグループ企業の営業所。
+//! `company_name` が null なら自社、値があればグループ企業の営業所 (互換のために残す欄)。
+//! `company_id` は営業所の事業者 ([`crate::companies`]。`tenko_offices.company_id`、uuid か null)。本文では任意で、null・省略は null
+//! (PUT は全部の置き換えなので省略すると null に戻る)。事業者を消すと表の外部キーで null に戻る。
 //! 検める欄: 本文が読めない `invalid_body` / 名称が空 `invalid_name` / 長さ `too_long` / 営業所の件数 `too_many_offices` /
 //! 組の空 `invalid_carins_base` / 端末の id の形 `invalid_device` / id と組の件数 `too_many_ids` / `manager_ids` に同じテナントの在籍で role に manager か admin を含む社員以外 `invalid_manager` /
-//! `vehicle_ids` に同じテナントの未削除の車両以外 `invalid_vehicle`。外れたら 400 `{"error": "<語>"}`。
+//! `vehicle_ids` に同じテナントの未削除の車両以外 `invalid_vehicle` / `company_id` に同じテナントの事業者以外 `invalid_company`。外れたら 400 `{"error": "<語>"}`。
 //! 文字列は前後の空白を落とし、会社名・住所は空なら null。重複した id は 1 つにまとめる。
 //! `vehicle_ids` は営業所の車両の置き換え: 一覧に無い車両は所属を外し、一覧の車両はこの営業所へ付け替える (車両は 1 営業所だけ)。
 //!
@@ -59,6 +61,8 @@ pub struct OfficeInput {
     #[serde(default)]
     pub company_name: Option<String>,
     #[serde(default)]
+    pub company_id: Option<Uuid>,
+    #[serde(default)]
     pub address: Option<String>,
     #[serde(default)]
     pub manager_ids: Vec<Uuid>,
@@ -92,6 +96,7 @@ pub struct Office {
     pub id: Uuid,
     pub name: String,
     pub company_name: Option<String>,
+    pub company_id: Option<Uuid>,
     pub address: Option<String>,
     pub manager_ids: Vec<Uuid>,
     pub vehicle_ids: Vec<Uuid>,
@@ -209,7 +214,8 @@ fn clean(v: Option<String>) -> Option<String> {
 
 pub mod sql {
     /// $1 tenant_id / $2 営業所の id (null なら全部)
-    pub const OFFICES: &str = "SELECT id, name, company_name, address FROM alc_api.tenko_offices \
+    pub const OFFICES: &str =
+        "SELECT id, name, company_name, address, company_id FROM alc_api.tenko_offices \
          WHERE tenant_id = $1 AND ($2::uuid IS NULL OR id = $2) ORDER BY name, id";
 
     /// $1 tenant_id / $2 営業所の id (null なら全部)
@@ -287,13 +293,17 @@ pub mod sql {
     pub const VEHICLE_COUNT: &str = "SELECT count(*) FROM alc_api.maintenance_vehicles \
          WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL";
 
-    /// $1 tenant_id / $2 name / $3 company_name / $4 address
-    pub const INSERT: &str =
-        "INSERT INTO alc_api.tenko_offices (tenant_id, name, company_name, address) \
-         VALUES ($1, $2, $3, $4) RETURNING id";
+    /// 事業者がテナントに在るか ([`crate::companies`] と同じ確かめ方)。$1 tenant_id / $2 事業者の id
+    pub const COMPANY_EXISTS: &str =
+        "SELECT id FROM alc_api.tenko_companies WHERE tenant_id = $1 AND id = $2";
 
-    /// $1 tenant_id / $2 id / $3 name / $4 company_name / $5 address
-    pub const UPDATE: &str = "UPDATE alc_api.tenko_offices SET name = $3, company_name = $4, address = $5, updated_at = NOW() \
+    /// $1 tenant_id / $2 name / $3 company_name / $4 address / $5 company_id
+    pub const INSERT: &str =
+        "INSERT INTO alc_api.tenko_offices (tenant_id, name, company_name, address, company_id) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id";
+
+    /// $1 tenant_id / $2 id / $3 name / $4 company_name / $5 address / $6 company_id
+    pub const UPDATE: &str = "UPDATE alc_api.tenko_offices SET name = $3, company_name = $4, address = $5, company_id = $6, updated_at = NOW() \
          WHERE tenant_id = $1 AND id = $2 RETURNING id";
 
     /// $1 tenant_id / $2 office_id
@@ -361,6 +371,7 @@ async fn load(tx: &TenantTx<'_>, tenant_id: Uuid, only: Option<Uuid>) -> Result<
                 name: r.get(1),
                 company_name: r.get(2),
                 address: r.get(3),
+                company_id: r.get(4),
                 manager_ids: managers
                     .iter()
                     .filter(|m| m.get::<_, Uuid>(0) == id)
@@ -450,14 +461,26 @@ pub async fn save(
             if vehicles.get::<_, i64>(0) != input.vehicle_ids.len() as i64 {
                 return Ok(Saved::Invalid("invalid_vehicle"));
             }
+            if let Some(company_id) = input.company_id {
+                let found = tx
+                    .query_typed_opt(
+                        sql::COMPANY_EXISTS,
+                        &[(&tenant_id, Type::UUID), (&company_id, Type::UUID)],
+                    )
+                    .await?;
+                if found.is_none() {
+                    return Ok(Saved::Invalid("invalid_company"));
+                }
+            }
             let office_id: Uuid = match id {
                 Some(id) => {
-                    let args: [Arg; 5] = [
+                    let args: [Arg; 6] = [
                         (&tenant_id, Type::UUID),
                         (&id, Type::UUID),
                         (&input.name, Type::TEXT),
                         (&input.company_name, Type::TEXT),
                         (&input.address, Type::TEXT),
+                        (&input.company_id, Type::UUID),
                     ];
                     match tx.query_typed_opt(sql::UPDATE, &args).await? {
                         Some(r) => r.get(0),
@@ -471,11 +494,12 @@ pub async fn save(
                     if count.get::<_, i64>(0) >= MAX_OFFICES {
                         return Ok(Saved::Invalid("too_many_offices"));
                     }
-                    let args: [Arg; 4] = [
+                    let args: [Arg; 5] = [
                         (&tenant_id, Type::UUID),
                         (&input.name, Type::TEXT),
                         (&input.company_name, Type::TEXT),
                         (&input.address, Type::TEXT),
+                        (&input.company_id, Type::UUID),
                     ];
                     tx.query_typed_one(sql::INSERT, &args).await?.get(0)
                 }
