@@ -7,7 +7,10 @@
 //!
 //! **2 口とも admin だけ** (`X-User-Role` が admin でなければ 403 `forbidden`)。文字列は前後の空白を落とし、空は null にする。
 //! 検める欄: 事業者番号 (半角数字 12 桁)・事業種別 (1〜8)・営業所 (名称は必須、実施・被実施の別は 1〜3、20 件まで)・
-//! 長さ (1 欄 500 文字まで)。外れたら 400 `{"error": "<欄>"}`。この表は dev の軸を持たない。
+//! 郵便番号 (ハイフンを落として半角数字 7 桁)・法人番号 (半角数字 13 桁)・受委託の相手の会社 (名称は必須、10 社まで、
+//! 営業所は名称が必須で 20 件まで)・長さ (1 欄 500 文字まで)。外れたら 400 `{"error": "<欄>"}`。この表は dev の軸を持たない。
+//! フリガナ・郵便番号・電話・法人番号・代表者の役職・担当者の部門名と住所・相手の会社 (partners) は 213 で足した欄で、
+//! 画面が e-Gov の申請データ (一時保存・申請済みの控え) と突き合わせるのに使う。
 
 use alc_core_wasm::{AuthUser, TenantId};
 use alc_worker_db::{PgClient, TxOutput};
@@ -32,6 +35,8 @@ pub const DEFAULT_DEVICE_NAME: &str = "一歩庵点呼 v1";
 pub const MAX_OFFICES: usize = 20;
 /// 1 欄の文字数の上限
 pub const MAX_CHARS: usize = 500;
+/// 受委託の相手の会社の件数の上限
+pub const MAX_PARTNERS: usize = 10;
 
 /// 点呼に係る営業所又は車庫 (参考様式の申請 1 件ぶん)。`role` は #17 の 1 実施 / 2 被実施 / 3 実施・被実施両方
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +45,26 @@ pub struct Office {
     #[serde(default)]
     pub address: Option<String>,
     pub role: i16,
+}
+
+/// 受委託の相手の会社の営業所
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PartnerOffice {
+    pub name: String,
+    #[serde(default)]
+    pub address: Option<String>,
+}
+
+/// 受委託の相手の会社 (事業者間遠隔点呼の受委託の許可申請の委託者・受託者)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Partner {
+    pub name: String,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub representative: Option<String>,
+    #[serde(default)]
+    pub offices: Vec<PartnerOffice>,
 }
 
 /// 設定の全部の欄 (GET の応答と PUT の本文。PUT の `updated_at` は読まない)
@@ -59,6 +84,18 @@ pub struct FilingSettings {
     pub operator_contact_name: Option<String>,
     pub operator_contact_phone: Option<String>,
     pub operator_contact_email: Option<String>,
+    pub operator_kana: Option<String>,
+    pub operator_address_kana: Option<String>,
+    pub operator_postal_code: Option<String>,
+    pub operator_phone: Option<String>,
+    pub operator_corporate_number: Option<String>,
+    pub operator_representative_kana: Option<String>,
+    pub operator_representative_title: Option<String>,
+    pub operator_contact_kana: Option<String>,
+    pub operator_contact_dept: Option<String>,
+    pub operator_contact_postal_code: Option<String>,
+    pub operator_contact_address: Option<String>,
+    pub partners: Vec<Partner>,
     pub applicant_name: Option<String>,
     pub applicant_kana: Option<String>,
     pub applicant_address: Option<String>,
@@ -83,7 +120,7 @@ impl FilingSettings {
     }
 
     /// 文字列の欄 (営業所の中を除く)。並びは表の列と同じ
-    fn texts_mut(&mut self) -> [&mut Option<String>; 19] {
+    fn texts_mut(&mut self) -> [&mut Option<String>; 30] {
         [
             &mut self.business_number,
             &mut self.trade_name,
@@ -96,6 +133,17 @@ impl FilingSettings {
             &mut self.operator_contact_name,
             &mut self.operator_contact_phone,
             &mut self.operator_contact_email,
+            &mut self.operator_kana,
+            &mut self.operator_address_kana,
+            &mut self.operator_postal_code,
+            &mut self.operator_phone,
+            &mut self.operator_corporate_number,
+            &mut self.operator_representative_kana,
+            &mut self.operator_representative_title,
+            &mut self.operator_contact_kana,
+            &mut self.operator_contact_dept,
+            &mut self.operator_contact_postal_code,
+            &mut self.operator_contact_address,
             &mut self.applicant_name,
             &mut self.applicant_kana,
             &mut self.applicant_address,
@@ -125,6 +173,22 @@ impl FilingSettings {
         {
             return Err("invalid_business_number");
         }
+        for v in [
+            &mut self.operator_postal_code,
+            &mut self.operator_contact_postal_code,
+        ] {
+            *v = v.take().map(|p| p.replace(['-', '－', '‐'], ""));
+            if v.as_ref().is_some_and(|p| !digits(p, 7)) {
+                return Err("invalid_postal_code");
+            }
+        }
+        if self
+            .operator_corporate_number
+            .as_ref()
+            .is_some_and(|n| !digits(n, 13))
+        {
+            return Err("invalid_corporate_number");
+        }
         if self.business_type.is_some_and(|t| !(1..=8).contains(&t)) {
             return Err("invalid_business_type");
         }
@@ -145,9 +209,42 @@ impl FilingSettings {
                 return Err("too_long");
             }
         }
+        if self.partners.len() > MAX_PARTNERS {
+            return Err("too_many_partners");
+        }
+        for p in &mut self.partners {
+            p.name = p.name.trim().to_owned();
+            p.address = clean(p.address.take());
+            p.representative = clean(p.representative.take());
+            if p.name.is_empty() || p.offices.len() > MAX_OFFICES {
+                return Err("invalid_partner");
+            }
+            for o in &mut p.offices {
+                o.name = o.name.trim().to_owned();
+                o.address = clean(o.address.take());
+                if o.name.is_empty() {
+                    return Err("invalid_partner");
+                }
+            }
+            let texts = [Some(&p.name), p.address.as_ref(), p.representative.as_ref()]
+                .into_iter()
+                .chain(
+                    p.offices
+                        .iter()
+                        .flat_map(|o| [Some(&o.name), o.address.as_ref()]),
+                );
+            if texts.flatten().any(|t| t.chars().count() > MAX_CHARS) {
+                return Err("too_long");
+            }
+        }
         self.updated_at = None;
         Ok(self)
     }
+}
+
+/// 半角数字 `n` 桁
+fn digits(s: &str, n: usize) -> bool {
+    s.len() == n && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn clean(v: Option<String>) -> Option<String> {
@@ -160,7 +257,10 @@ pub mod sql {
          auto_cert_post, operator_name, operator_address, operator_representative, operator_contact_name, \
          operator_contact_phone, operator_contact_email, applicant_name, applicant_kana, applicant_address, \
          applicant_contact_name, applicant_contact_dept, applicant_contact_phone, applicant_contact_email, \
-         product_url, updated_at";
+         product_url, operator_kana, operator_address_kana, operator_postal_code, operator_phone, \
+         operator_corporate_number, operator_representative_kana, operator_representative_title, \
+         operator_contact_kana, operator_contact_dept, operator_contact_postal_code, operator_contact_address, \
+         partners, updated_at";
 
     /// $1 tenant_id
     pub const GET: &str = const_format::concatcp!(
@@ -169,14 +269,18 @@ pub mod sql {
         " FROM alc_api.tenko_filing_settings WHERE tenant_id = $1"
     );
 
-    /// 全部の欄を置き換える。$1 tenant_id / $2〜$22 は [`COLUMNS`] の updated_at の前までと同じ順
+    /// 全部の欄を置き換える。$1 tenant_id / $2〜$34 は [`COLUMNS`] の updated_at の前までと同じ順
     pub const UPSERT: &str = const_format::concatcp!(
         "INSERT INTO alc_api.tenko_filing_settings (tenant_id, ",
         "business_number, trade_name, business_type, offices, device_name, auto_cert_pre, \
          auto_cert_post, operator_name, operator_address, operator_representative, operator_contact_name, \
          operator_contact_phone, operator_contact_email, applicant_name, applicant_kana, applicant_address, \
-         applicant_contact_name, applicant_contact_dept, applicant_contact_phone, applicant_contact_email, product_url) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) \
+         applicant_contact_name, applicant_contact_dept, applicant_contact_phone, applicant_contact_email, product_url, \
+         operator_kana, operator_address_kana, operator_postal_code, operator_phone, operator_corporate_number, \
+         operator_representative_kana, operator_representative_title, operator_contact_kana, operator_contact_dept, \
+         operator_contact_postal_code, operator_contact_address, partners) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, \
+         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34) \
          ON CONFLICT (tenant_id) DO UPDATE SET \
              business_number = EXCLUDED.business_number, trade_name = EXCLUDED.trade_name, \
              business_type = EXCLUDED.business_type, offices = EXCLUDED.offices, device_name = EXCLUDED.device_name, \
@@ -192,7 +296,17 @@ pub mod sql {
              applicant_contact_dept = EXCLUDED.applicant_contact_dept, \
              applicant_contact_phone = EXCLUDED.applicant_contact_phone, \
              applicant_contact_email = EXCLUDED.applicant_contact_email, \
-             product_url = EXCLUDED.product_url, updated_at = NOW() \
+             product_url = EXCLUDED.product_url, \
+             operator_kana = EXCLUDED.operator_kana, operator_address_kana = EXCLUDED.operator_address_kana, \
+             operator_postal_code = EXCLUDED.operator_postal_code, operator_phone = EXCLUDED.operator_phone, \
+             operator_corporate_number = EXCLUDED.operator_corporate_number, \
+             operator_representative_kana = EXCLUDED.operator_representative_kana, \
+             operator_representative_title = EXCLUDED.operator_representative_title, \
+             operator_contact_kana = EXCLUDED.operator_contact_kana, \
+             operator_contact_dept = EXCLUDED.operator_contact_dept, \
+             operator_contact_postal_code = EXCLUDED.operator_contact_postal_code, \
+             operator_contact_address = EXCLUDED.operator_contact_address, \
+             partners = EXCLUDED.partners, updated_at = NOW() \
          RETURNING ",
         COLUMNS
     );
@@ -201,6 +315,7 @@ pub mod sql {
 fn settings(r: &Row) -> FilingSettings {
     // offices は表の CHECK で配列。要素の形は書き込みで検めているが、読めなければ空にする (画面を開けなくしない)
     let offices: serde_json::Value = r.get(3);
+    let partners: serde_json::Value = r.get(32);
     FilingSettings {
         business_number: r.get(0),
         trade_name: r.get(1),
@@ -223,7 +338,19 @@ fn settings(r: &Row) -> FilingSettings {
         applicant_contact_phone: r.get(18),
         applicant_contact_email: r.get(19),
         product_url: r.get(20),
-        updated_at: r.get(21),
+        operator_kana: r.get(21),
+        operator_address_kana: r.get(22),
+        operator_postal_code: r.get(23),
+        operator_phone: r.get(24),
+        operator_corporate_number: r.get(25),
+        operator_representative_kana: r.get(26),
+        operator_representative_title: r.get(27),
+        operator_contact_kana: r.get(28),
+        operator_contact_dept: r.get(29),
+        operator_contact_postal_code: r.get(30),
+        operator_contact_address: r.get(31),
+        partners: serde_json::from_value(partners).unwrap_or_default(),
+        updated_at: r.get(33),
     }
 }
 
@@ -251,7 +378,8 @@ pub async fn put_settings(
     pg.tenant_tx(tenant_id, move |tx| {
         Box::pin(async move {
             let offices = serde_json::to_value(&s.offices).unwrap_or_else(|_| json!([]));
-            let args: [Arg; 22] = [
+            let partners = serde_json::to_value(&s.partners).unwrap_or_else(|_| json!([]));
+            let args: [Arg; 34] = [
                 (&tenant_id, Type::UUID),
                 (&s.business_number, Type::TEXT),
                 (&s.trade_name, Type::TEXT),
@@ -274,6 +402,18 @@ pub async fn put_settings(
                 (&s.applicant_contact_phone, Type::TEXT),
                 (&s.applicant_contact_email, Type::TEXT),
                 (&s.product_url, Type::TEXT),
+                (&s.operator_kana, Type::TEXT),
+                (&s.operator_address_kana, Type::TEXT),
+                (&s.operator_postal_code, Type::TEXT),
+                (&s.operator_phone, Type::TEXT),
+                (&s.operator_corporate_number, Type::TEXT),
+                (&s.operator_representative_kana, Type::TEXT),
+                (&s.operator_representative_title, Type::TEXT),
+                (&s.operator_contact_kana, Type::TEXT),
+                (&s.operator_contact_dept, Type::TEXT),
+                (&s.operator_contact_postal_code, Type::TEXT),
+                (&s.operator_contact_address, Type::TEXT),
+                (&partners, Type::JSONB),
             ];
             Ok(settings(&tx.query_typed_one(sql::UPSERT, &args).await?))
         })
@@ -336,6 +476,22 @@ async fn put_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn partner(name: &str, offices: Vec<PartnerOffice>) -> Partner {
+        Partner {
+            name: name.to_owned(),
+            address: None,
+            representative: None,
+            offices,
+        }
+    }
+
+    fn poffice(name: &str) -> PartnerOffice {
+        PartnerOffice {
+            name: name.to_owned(),
+            address: None,
+        }
+    }
 
     fn office(name: &str, role: i16) -> Office {
         Office {
@@ -429,15 +585,92 @@ mod tests {
         assert_eq!(
             bad(FilingSettings {
                 offices: vec![Office {
-                    address: Some(long),
+                    address: Some(long.clone()),
                     ..office("a", 1)
                 }],
                 ..base()
             }),
             "too_long"
         );
+        for p in ["12345", "12345678", "123-456", "１２３４５６７"] {
+            assert_eq!(
+                bad(FilingSettings {
+                    operator_contact_postal_code: Some(p.to_owned()),
+                    ..base()
+                }),
+                "invalid_postal_code"
+            );
+        }
+        for n in ["123456789012", "12345678901234", "123456789012a"] {
+            assert_eq!(
+                bad(FilingSettings {
+                    operator_corporate_number: Some(n.to_owned()),
+                    ..base()
+                }),
+                "invalid_corporate_number"
+            );
+        }
+        assert_eq!(
+            bad(FilingSettings {
+                partners: vec![partner("a", vec![]); MAX_PARTNERS + 1],
+                ..base()
+            }),
+            "too_many_partners"
+        );
+        for p in [
+            partner(" ", vec![]),
+            partner("a", vec![poffice(" ")]),
+            partner("a", vec![poffice("b"); MAX_OFFICES + 1]),
+        ] {
+            assert_eq!(
+                bad(FilingSettings {
+                    partners: vec![p],
+                    ..base()
+                }),
+                "invalid_partner"
+            );
+        }
+        for p in [
+            partner(&long, vec![]),
+            Partner {
+                representative: Some(long.clone()),
+                ..partner("a", vec![])
+            },
+            partner("a", vec![poffice(&long)]),
+            partner(
+                "a",
+                vec![PartnerOffice {
+                    address: Some(long.clone()),
+                    ..poffice("b")
+                }],
+            ),
+        ] {
+            assert_eq!(
+                bad(FilingSettings {
+                    partners: vec![p],
+                    ..base()
+                }),
+                "too_long"
+            );
+        }
+        // 郵便番号のハイフン (半角・全角) は落とす
+        let s = FilingSettings {
+            operator_postal_code: Some("856－0044".to_owned()),
+            operator_contact_postal_code: Some(" 856-0044 ".to_owned()),
+            ..base()
+        }
+        .normalize()
+        .unwrap();
+        assert_eq!(
+            (s.operator_postal_code, s.operator_contact_postal_code),
+            (Some("8560044".to_owned()), Some("8560044".to_owned()))
+        );
         // 上限ちょうどは通る
         assert!(FilingSettings {
+            partners: vec![
+                partner(&"あ".repeat(MAX_CHARS), vec![poffice("b"); MAX_OFFICES]);
+                MAX_PARTNERS
+            ],
             business_type: Some(8),
             offices: vec![office(&"あ".repeat(MAX_CHARS), 3); MAX_OFFICES],
             ..base()
