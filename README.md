@@ -30,6 +30,8 @@ ippoan/alc-measurements-worker へ移した。Refs ippoan/rust-alc-api#680)
 | `/api/tenko/webhooks/{id}` | GET・DELETE | 設定の 1 件・削除 |
 | `/api/tenko/webhooks/{id}/deliveries` | GET | 配信の記録 (新しい順に 100 件) |
 | `/api/tenko/filing-settings` | GET・PUT | 点呼の届出・認定申請に差し込む値 (テナント 1 行、admin だけ。行が無ければ既定値・PUT は全欄の置き換え) |
+| `/api/tenko/filing-archives` | GET・POST | e-Gov で出した点呼の届出の申請データ (zip) の保管 (R2、admin だけ)。POST は本文が zip そのままで、`X-Filing-Name` (ファイル名を encodeURIComponent。必須・1〜200 文字) と `X-Filing-Meta` (要約の JSON object を encodeURIComponent。任意・4000 文字まで) → 201 `{id, name, size, saved_at, saved_by, meta}`。空は 400 `empty`・20 MiB を超えると 413 `too_large`。GET は一覧 (`saved_at` の新しい順、1000 件まで)。R2 の binding が無ければ 503 |
+| `/api/tenko/filing-archives/{id}` | GET | 保管した zip (`Content-Disposition: attachment` で元のファイル名)。無い・id の形でなければ 404 |
 | `/api/tenko/offices` | GET・POST | 点呼の営業所 (運行管理者・車両の所属つき、4 口とも admin だけ)。GET は `{offices, vehicles, carins_bases}` (未削除の車両と、車検証の使用の本拠+使用者の組の一覧つき。組ごとに営業所を選ぶ。組の値は半角・全角の空白を取り除いて正規化。営業所は所属の点呼端末 `device_ids` つき)・POST は 201 で営業所 1 件 |
 | `/api/tenko/offices/{id}` | PUT・DELETE | 営業所の全部の置き換え (`manager_ids`・`vehicle_ids`・`carins_bases`・`device_ids` も。車両は別の営業所から移る)・削除 (204)。無ければ 404 |
 | `/api/tenko/dashboard` | GET | ダッシュボード (件数と予定超過) |
