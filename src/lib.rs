@@ -12,7 +12,6 @@
 
 mod db;
 mod mail;
-mod r2;
 mod tcp;
 mod webhook;
 
@@ -36,10 +35,6 @@ use worker::{
 /// 差出人の変数。どちらかが無ければメールは送らない (ほかは動く。Refs ippoan/alc-app#676)
 const ANOMALY_EMAIL_BINDING: &str = "ANOMALY_EMAIL";
 const NOTIFY_EMAIL_FROM_VAR: &str = "NOTIFY_EMAIL_FROM";
-
-/// 点呼の届出の申請データの R2 の binding (wrangler.toml の `[[r2_buckets]]`。トップと staging で別の bucket)。
-/// 無ければ (ローカルなど) その 3 口だけ 503 (ほかは動く)
-const TENKO_FILINGS_R2_BINDING: &str = "TENKO_FILINGS_R2";
 
 /// 送り手を作る。binding が無い・差出人が未設定なら `None`
 fn anomaly_mailer(env: &Env) -> Option<SharedMailer> {
@@ -89,10 +84,6 @@ async fn fetch(req: HttpRequest, env: Env, ctx: Context) -> Result<Response<Body
         // wasm32 で chrono の Utc::now() は使えない (時計を持たない) ので、Date.now() を渡す
         clock: Arc::new(|| worker::Date::now().as_millis() as i64),
         outbox: outbox.clone(),
-        files: env
-            .bucket(TENKO_FILINGS_R2_BINDING)
-            .ok()
-            .map(|b| Arc::new(r2::R2Store::new(b)) as tenko::filing_archives::SharedStore),
     };
     let mut resp = match router().with_state(state).call(req).await {
         Ok(r) => r,

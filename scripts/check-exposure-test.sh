@@ -64,8 +64,6 @@ mutate "staging の triggers を消す (本番の定時実行を継承する)" \
   's = s.replace("[env.staging.triggers]\ncrons = []\n", "", 1)'
 mutate "local の triggers を消す (本番の定時実行を継承する)" \
   's = s.replace("[env.local.triggers]\ncrons = []\n", "", 1)'
-mutate "staging の r2_buckets が本番の bucket を指す (本番の申請データを読み書きする)" \
-  's = s.replace("bucket_name = \"alc-tenko-filings-staging\"", "bucket_name = \"alc-tenko-filings\"", 1)'
 mutate "staging の services が本番の Worker を指す (いまは無いが、足したときの検査)" \
   's += "\n[[services]]\nbinding = \"X\"\nservice = \"x-prod\"\n\n[[env.staging.services]]\nbinding = \"X\"\nservice = \"x-prod\"\n"'
 

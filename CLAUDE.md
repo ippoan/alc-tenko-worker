@@ -53,11 +53,7 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   遅延 (`overdue::run` が CLAIM で印を付けた予定だけ) を、notify のグループ「点呼の異常」の宛先へ 1 人 1 通。送り手は `send_email` の
   binding `ANOMALY_EMAIL` (destination_address 無し) と変数 `NOTIFY_EMAIL_FROM` (`src/mail.rs`)。遅延のテナントは
   `list_tenko_overdue_tenants()` (migration 212。webhook の設定の有無を見ない) で引く。ログは固定の語だけ。
-- **点呼の届出の申請データの保管** (`filing_archives.rs`、`/api/tenko/filing-archives*`、admin だけ): e-Gov の申請データ (zip) を
-  R2 (binding `TENKO_FILINGS_R2`。本番と staging で別の bucket、env.local は持たない = その 3 口だけ 503) に置く。DB に行を持たない
-  (名前・要約・保存した人・時刻は customMetadata。uuid だけ `gen_random_uuid()` で引く)。キーは `{tenant_id}/{ms}-{uuid}.zip`。
-  置き場の trait (`FileStore`) は crate、R2 の実装は `src/r2.rs` (wasm 専用)。R2 の future は Send でないので `tenant_tx` の中で await しない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 16・admin_db 3・call_db 2・deliver_db 2・failures_db 1・filing_db 2・filing_archives_db 4・fire_db 2・mail_db 3・offices_db 6・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 16・admin_db 3・call_db 2・deliver_db 2・failures_db 1・filing_db 2・fire_db 2・mail_db 3・offices_db 6・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。
