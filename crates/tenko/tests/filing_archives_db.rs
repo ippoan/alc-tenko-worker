@@ -155,7 +155,7 @@ fn h(v: &str) -> HeaderValue {
 }
 
 /// encodeURIComponent と同じく、英数字と `-_.!~*'()` 以外を % にする
-fn enc(s: &str) -> HeaderValue {
+fn enc(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
@@ -164,7 +164,7 @@ fn enc(s: &str) -> HeaderValue {
             out.push_str(&format!("%{b:02X}"));
         }
     }
-    h(&out)
+    out
 }
 
 /// RFC 8187 の attr-char (英数字と `!#$&+-.^_`|~`) 以外を % にする
@@ -180,17 +180,11 @@ fn attr(s: &str) -> String {
         .collect()
 }
 
-async fn post(app: &App, tenant: Uuid, headers: &[(&str, HeaderValue)], body: &[u8]) -> Got {
-    send(
-        app,
-        "POST",
-        PATH,
-        tenant,
-        Some("admin"),
-        headers,
-        body.to_vec(),
-    )
-    .await
+/// `query` (encode 済み) を付けて保存の口を admin で打つ
+async fn post(app: &App, tenant: Uuid, query: &str, body: &[u8]) -> Got {
+    let uri = format!("{PATH}?{query}");
+    let ct = [("Content-Type", h("application/zip"))];
+    send(app, "POST", &uri, tenant, Some("admin"), &ct, body.to_vec()).await
 }
 
 fn with_store(pg: alc_worker_db::PgClient, store: &Arc<Mock>) -> App {
@@ -211,11 +205,7 @@ async fn archives_save_list_get() {
     let got = post(
         &app,
         t,
-        &[
-            ("X-Filing-Name", enc(name)),
-            ("X-Filing-Meta", enc(&meta.to_string())),
-            ("Content-Type", h("application/zip")),
-        ],
+        &format!("meta={}&name={}", enc(&meta.to_string()), enc(name)),
         b"PK\x03\x04 fake zip",
     )
     .await;
@@ -250,7 +240,7 @@ async fn archives_save_list_get() {
     );
 
     // meta 無しの保存 (meta は null)
-    let got = post(&app, t, &[("X-Filing-Name", enc("b.zip"))], b"zip").await;
+    let got = post(&app, t, "name=b.zip", b"zip").await;
     assert_eq!((got.status, got.json()["meta"].clone()), (201, json!(null)));
     let second = got.json()["id"].as_str().unwrap().to_owned();
 
@@ -365,63 +355,70 @@ async fn archives_reject_bad_requests() {
     let store = Arc::new(Mock::default());
     let app = with_store(rt_client().await, &store);
     let t = tenant().await;
-    let name = ("X-Filing-Name", enc("a.zip"));
+    let name = "name=a.zip";
 
     // admin 以外 (役の無い要求・admin でない役) は 3 口とも 403
     let one = format!("{PATH}/1793151000000-{}", Uuid::new_v4());
+    let post_uri = format!("{PATH}?{name}");
     for (method, uri, role) in [
-        ("POST", PATH, None),
-        ("POST", PATH, Some("viewer")),
+        ("POST", post_uri.as_str(), None),
+        ("POST", post_uri.as_str(), Some("viewer")),
         ("GET", PATH, Some("viewer")),
         ("GET", one.as_str(), Some("viewer")),
     ] {
-        let got = send(
-            &app,
-            method,
-            uri,
-            t,
-            role,
-            std::slice::from_ref(&name),
-            b"zip".to_vec(),
-        )
-        .await;
+        let got = send(&app, method, uri, t, role, &[], b"zip".to_vec()).await;
         assert_eq!(
             (got.status, got.json()),
             (403, json!({ "error": "forbidden" }))
         );
     }
 
-    // 名前: 無い・空・201 文字・UTF-8 でない・ASCII でない
-    for headers in [
-        vec![],
-        vec![("X-Filing-Name", h(""))],
-        vec![("X-Filing-Name", enc(&"あ".repeat(201)))],
-        vec![("X-Filing-Name", h("%FF"))],
-        vec![(
-            "X-Filing-Name",
-            HeaderValue::from_bytes(b"\xe3\x81\x82").unwrap(),
-        )],
+    // 名前: 無い・`=` が無い・似た名前のキーだけ・空・201 文字・UTF-8 でない。ヘッダーでは受けない
+    for query in [
+        String::new(),
+        "name".to_owned(),
+        "names=a.zip&filename=a.zip".to_owned(),
+        "name=".to_owned(),
+        format!("name={}", enc(&"あ".repeat(201))),
+        "name=%FF".to_owned(),
     ] {
-        let got = post(&app, t, &headers, b"zip").await;
+        let got = post(&app, t, &query, b"zip").await;
         assert_eq!(
             (got.status, got.json()),
             (400, json!({ "error": "invalid_name" }))
         );
     }
+    let got = send(
+        &app,
+        "POST",
+        PATH,
+        t,
+        Some("admin"),
+        &[("X-Filing-Name", h("a.zip"))],
+        b"zip".to_vec(),
+    )
+    .await;
+    assert_eq!(
+        (got.status, got.json()),
+        (400, json!({ "error": "invalid_name" }))
+    );
     // 200 文字は通る
     let got = post(
         &app,
         t,
-        &[("X-Filing-Name", enc(&"あ".repeat(200)))],
+        &format!("x=1&name={}", enc(&"あ".repeat(200))),
         b"zip",
     )
     .await;
     assert_eq!(got.status, 201);
+    // `+` は空白にしない (encodeURIComponent は空白を %20 にする)
+    let got = post(&app, t, "name=a+b%20c.zip", b"zip").await;
+    assert_eq!(got.json()["name"], "a+b c.zip");
 
     // 要約: JSON でない・object でない・4000 文字を超える・UTF-8 でない
     let long = json!({ "x": "a".repeat(4000) }).to_string();
-    for meta in [enc("{"), enc("[1]"), enc(&long), h("%FF")] {
-        let got = post(&app, t, &[name.clone(), ("X-Filing-Meta", meta)], b"zip").await;
+    for meta in [enc("{"), enc("[1]"), enc(&long), "%FF".to_owned()] {
+        let got = post(&app, t, &format!("{name}&meta={meta}"), b"zip").await;
         assert_eq!(
             (got.status, got.json()),
             (400, json!({ "error": "invalid_meta" }))
@@ -429,20 +426,14 @@ async fn archives_reject_bad_requests() {
     }
 
     // 本文: 空は 400、20 MiB を超えると 413 (ちょうど 20 MiB は通る)
-    let got = post(&app, t, std::slice::from_ref(&name), b"").await;
+    let got = post(&app, t, name, b"").await;
     assert_eq!((got.status, got.json()), (400, json!({ "error": "empty" })));
-    let got = post(
-        &app,
-        t,
-        std::slice::from_ref(&name),
-        &vec![0u8; MAX_BYTES + 1],
-    )
-    .await;
+    let got = post(&app, t, name, &vec![0u8; MAX_BYTES + 1]).await;
     assert_eq!(
         (got.status, got.json()),
         (413, json!({ "error": "too_large" }))
     );
-    let got = post(&app, t, std::slice::from_ref(&name), &vec![0u8; MAX_BYTES]).await;
+    let got = post(&app, t, name, &vec![0u8; MAX_BYTES]).await;
     assert_eq!(
         (got.status, got.json()["size"].clone()),
         (201, json!(MAX_BYTES))
@@ -479,17 +470,13 @@ async fn archives_unconfigured_store_is_503() {
     let app = build_with_files(rt_client().await, None);
     let t = tenant().await;
     let one = format!("{PATH}/1793151000000-{}", Uuid::new_v4());
-    for (method, uri) in [("POST", PATH), ("GET", PATH), ("GET", one.as_str())] {
-        let got = send(
-            &app,
-            method,
-            uri,
-            t,
-            Some("admin"),
-            &[("X-Filing-Name", enc("a.zip"))],
-            b"zip".to_vec(),
-        )
-        .await;
+    let post_uri = format!("{PATH}?name=a.zip");
+    for (method, uri) in [
+        ("POST", post_uri.as_str()),
+        ("GET", PATH),
+        ("GET", one.as_str()),
+    ] {
+        let got = send(&app, method, uri, t, Some("admin"), &[], b"zip".to_vec()).await;
         assert_eq!((got.status, got.body.len()), (503, 0));
     }
     assert_eq!(
@@ -524,17 +511,13 @@ async fn archives_store_and_db_failures_are_500() {
     });
     let app = with_store(rt_client().await, &failing);
     let one = format!("{PATH}/1793151000000-{}", Uuid::new_v4());
-    for (method, uri) in [("POST", PATH), ("GET", PATH), ("GET", one.as_str())] {
-        let got = send(
-            &app,
-            method,
-            uri,
-            t,
-            Some("admin"),
-            &[("X-Filing-Name", enc(name))],
-            b"zip".to_vec(),
-        )
-        .await;
+    let post_uri = format!("{PATH}?name={}", enc(name));
+    for (method, uri) in [
+        ("POST", post_uri.as_str()),
+        ("GET", PATH),
+        ("GET", one.as_str()),
+    ] {
+        let got = send(&app, method, uri, t, Some("admin"), &[], b"zip".to_vec()).await;
         assert_eq!((got.status, got.body.len()), (500, 0));
     }
     assert_eq!(
@@ -550,7 +533,7 @@ async fn archives_store_and_db_failures_are_500() {
     // uuid を引く DB が落ちていれば 500 (置き場には置かない)
     let store = Arc::new(Mock::default());
     let app = with_store(broken_client().await, &store);
-    let got = post(&app, t, &[("X-Filing-Name", enc(name))], b"zip").await;
+    let got = post(&app, t, &format!("name={}", enc(name)), b"zip").await;
     assert_eq!(got.status, 500);
     assert!(store.objects.lock().unwrap().is_empty());
     let logs = app.logs();
