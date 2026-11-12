@@ -1,9 +1,11 @@
 //! e-Gov で出した点呼の届出の申請データ (zip) の保管 (Refs ippoan/alc-app#676・#684)。管理画面 (alc-app の「点呼の届出」) が
 //! 申請データをブラウザで読んで食い違いを確かめた後、「保存」で到達後の zip をここへ送る。rust-alc-api には無い口。
 //!
-//! - `POST /tenko/filing-archives` — 本文は zip のバイト列そのまま。`X-Filing-Name` (元のファイル名を encodeURIComponent したもの。
-//!   必須、decode 後 1〜200 文字) と `X-Filing-Meta` (画面が読んだ要約の JSON object を encodeURIComponent したもの。任意、
-//!   decode 後 4000 文字まで。中身は解釈せず、そのまま保存して返す)。応答は 201 で保管 1 件
+//! - `POST /tenko/filing-archives?name=…&meta=…` — 本文は zip のバイト列そのまま。クエリの `name` (元のファイル名を
+//!   encodeURIComponent したもの。必須、decode 後 1〜200 文字) と `meta` (画面が読んだ要約の JSON object を encodeURIComponent
+//!   したもの。任意、decode 後 4000 文字まで。中身は解釈せず、そのまま保存して返す)。応答は 201 で保管 1 件。
+//!   ヘッダーで受けないのは、auth-worker の代理が転送するヘッダーを `X-Tenant-ID`・`X-User-*`・`Content-Type`・`Range` に
+//!   作り直すため (クエリはそのまま届く)
 //! - `GET /tenko/filing-archives` — テナントの保管の一覧 (`saved_at` の新しい順、[`MAX_LIST`] 件まで)
 //! - `GET /tenko/filing-archives/{id}` — zip を返す (`Content-Disposition: attachment` で元のファイル名)
 //!
@@ -19,8 +21,8 @@ use std::sync::Arc;
 use alc_core_wasm::{AuthUser, TenantId};
 use alc_worker_db::PgClient;
 use axum::body::Body;
-use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{Path, RawQuery, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
@@ -139,18 +141,23 @@ fn key(tenant_id: Uuid, id: &str) -> String {
     format!("{tenant_id}/{id}.zip")
 }
 
-/// ヘッダーの値を percent-decode する。無ければ `Some(None)`、ASCII でない・UTF-8 でなければ `None`
-fn decoded(headers: &HeaderMap, name: &str) -> Option<Option<String>> {
-    let Some(v) = headers.get(name) else {
+/// クエリの `key` の値 (最初の 1 つ) を percent-decode する。無ければ `Some(None)`、UTF-8 でなければ `None`。
+/// encodeURIComponent の値を受けるので `+` は空白にしない (`+` は `%2B` で届く)
+fn decoded(query: Option<&str>, key: &str) -> Option<Option<String>> {
+    let Some(v) = query
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
+    else {
         return Some(None);
     };
-    let s = percent_decode_str(v.to_str().ok()?).decode_utf8().ok()?;
+    let s = percent_decode_str(v).decode_utf8().ok()?;
     Some(Some(s.into_owned()))
 }
 
-/// `X-Filing-Name` を検める
-fn parse_name(headers: &HeaderMap) -> Option<String> {
-    let name = decoded(headers, "X-Filing-Name")??;
+/// クエリの `name` を検める
+fn parse_name(query: Option<&str>) -> Option<String> {
+    let name = decoded(query, "name")??;
     (1..=MAX_NAME_CHARS)
         .contains(&name.chars().count())
         .then_some(name)
@@ -159,9 +166,9 @@ fn parse_name(headers: &HeaderMap) -> Option<String> {
 /// 保存する要約の JSON の文字列と、応答に返す値
 type Meta = Option<(String, serde_json::Value)>;
 
-/// `X-Filing-Meta` を検める。無ければ `Some(None)`、長すぎる・JSON object でなければ `None`
-fn parse_meta(headers: &HeaderMap) -> Option<Meta> {
-    let Some(raw) = decoded(headers, "X-Filing-Meta")? else {
+/// クエリの `meta` を検める。無ければ `Some(None)`、長すぎる・JSON object でなければ `None`
+fn parse_meta(query: Option<&str>) -> Option<Meta> {
+    let Some(raw) = decoded(query, "meta")? else {
         return Some(None);
     };
     let value = serde_json::from_str::<serde_json::Value>(&raw)
@@ -232,7 +239,7 @@ async fn create_handler(
     State(state): State<AppState>,
     Extension(TenantId(tenant_id)): Extension<TenantId>,
     auth_user: Option<Extension<AuthUser>>,
-    headers: HeaderMap,
+    RawQuery(query): RawQuery,
     body: Body,
 ) -> Response {
     let stage = "filing archive put";
@@ -240,10 +247,10 @@ async fn create_handler(
         Ok(f) => f,
         Err(r) => return *r,
     };
-    let Some(name) = parse_name(&headers) else {
+    let Some(name) = parse_name(query.as_deref()) else {
         return error(StatusCode::BAD_REQUEST, "invalid_name");
     };
-    let Some(meta) = parse_meta(&headers) else {
+    let Some(meta) = parse_meta(query.as_deref()) else {
         return error(StatusCode::BAD_REQUEST, "invalid_meta");
     };
     // 上限を超えたら読むのをやめる (axum の既定の上限 2 MB は `Body` には掛からない)
