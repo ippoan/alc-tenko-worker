@@ -22,6 +22,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hmac = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 点呼の届出の申請データの名前・要約のヘッダー (encodeURIComponent) と Content-Disposition の filename*
+percent-encoding = "2"
 # webhook の署名の hash (HMAC-SHA256 の SHA-256)
 sha2 = "0.10"
 # 型付きの文の型 (`Type`) と列の型 (uuid・timestamptz・date・time・jsonb・text[])。接続は張らない
