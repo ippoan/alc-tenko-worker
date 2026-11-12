@@ -245,7 +245,7 @@ async fn archives_save_list_get() {
         (
             json!(ARRIVE),
             json!(name),
-            json!(18),
+            json!(ZIP.len()),
             json!(NOW),
             meta.clone(),
             true
