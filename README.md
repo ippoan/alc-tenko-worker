@@ -30,6 +30,8 @@ ippoan/alc-measurements-worker へ移した。Refs ippoan/rust-alc-api#680)
 | `/api/tenko/webhooks/{id}` | GET・DELETE | 設定の 1 件・削除 |
 | `/api/tenko/webhooks/{id}/deliveries` | GET | 配信の記録 (新しい順に 100 件) |
 | `/api/tenko/filing-settings` | GET・PUT | 点呼の届出・認定申請に差し込む値 (テナント 1 行、admin だけ。行が無ければ既定値・PUT は全欄の置き換え)。213 の欄 (事業者のフリガナ・郵便番号・電話・法人番号・代表者の役職・担当者の部門名と住所、受委託の相手の会社 `partners`) は画面が e-Gov の申請データと突き合わせるのに使う。郵便番号はハイフンを落として 7 桁 (`invalid_postal_code`)、法人番号は 13 桁 (`invalid_corporate_number`)、相手の会社は 10 社まで (`too_many_partners`)・名称必須 (`invalid_partner`) |
+| `/api/tenko/filing-archives` | GET | e-Gov で出した点呼の届出の申請済みの控え (zip) の一覧 (R2、admin だけ。`saved_at` の新しい順、1000 件まで)。R2 の binding が無ければ 503 |
+| `/api/tenko/filing-archives/{到達番号}` | GET・PUT | PUT は控えを到達番号で保存 (同じ到達番号は上書き)。本文は zip そのまま (先頭が `PK\x03\x04` でなければ 400 `not_zip`)、クエリの `name` (ファイル名を encodeURIComponent。任意・1〜200 文字・無ければ `{到達番号}.zip`) と `meta` (要約の JSON object を encodeURIComponent。任意・4000 文字まで。ヘッダーでは受けない = auth-worker の代理が転送しない) → 200 `{id, name, size, saved_at, saved_by, meta}`。到達番号の形 (16〜18 桁、末尾 1 字だけ英小文字可) でなければ 400 `invalid_arrive_id`・空は 400 `empty`・20 MiB を超えると 413 `too_large`。GET は zip (`Content-Disposition: attachment` で元のファイル名)。無い・形でなければ 404 |
 | `/api/tenko/offices` | GET・POST | 点呼の営業所 (運行管理者・車両の所属つき、4 口とも admin だけ)。GET は `{offices, vehicles, carins_bases}` (未削除の車両と、車検証の使用の本拠+使用者の組の一覧つき。組ごとに営業所を選ぶ。組の値は半角・全角の空白を取り除いて正規化。営業所は所属の点呼端末 `device_ids` つき)・POST は 201 で営業所 1 件 |
 | `/api/tenko/offices/{id}` | PUT・DELETE | 営業所の全部の置き換え (`manager_ids`・`vehicle_ids`・`carins_bases`・`device_ids` も。車両は別の営業所から移る)・削除 (204)。無ければ 404 |
 | `/api/tenko/dashboard` | GET | ダッシュボード (件数と予定超過) |

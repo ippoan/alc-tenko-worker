@@ -56,6 +56,13 @@ name = "ANOMALY_EMAIL"
 [vars]
 NOTIFY_EMAIL_FROM = "alc-alert@ippoan.org"
 
+# 点呼の届出の申請データ (e-Gov の zip) の保管 (crates/tenko の filing_archives、src/r2.rs。Refs ippoan/alc-app#676)。
+# binding は env に継承されないので、staging は下で staging 用の bucket を指す (本番の bucket を env から指さない。
+# scripts/check-exposure.sh が検査)。env.local は持たない (その 3 口だけ 503)
+[[r2_buckets]]
+binding = "TENKO_FILINGS_R2"
+bucket_name = "alc-tenko-filings"
+
 # staging: DB は ippoan/alc-vein-worker の staging と同じもの (Workers VPC の binding TENKO_DB_VPC から
 # 既存の Tunnel 経由で PgBouncer へ繋ぐ。src/db.rs)。Hyperdrive は通さない。
 [env.staging]
@@ -92,6 +99,11 @@ name = "ANOMALY_EMAIL"
 
 [env.staging.vars]
 NOTIFY_EMAIL_FROM = "alc-alert@ippoan.org"
+
+# 点呼の届出の申請データの保管は staging 用の bucket
+[[env.staging.r2_buckets]]
+binding = "TENKO_FILINGS_R2"
+bucket_name = "alc-tenko-filings-staging"
 
 # ローカル (`wrangler dev --env local`) 専用。deploy しない。
 # binding を持たない (binding は env に継承されない) ので、src/db.rs は文字列 DATABASE_URL の段で繋ぐ

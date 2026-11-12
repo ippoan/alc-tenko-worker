@@ -269,8 +269,13 @@ impl App {
 /// テストの今 (2026-10-28 水 10:30 JST)
 pub const NOW_MS: i64 = 1_793_151_000_000;
 
-/// worker の src/lib.rs と同じ組み立て (時計はテストの今)
+/// worker の src/lib.rs と同じ組み立て (時計はテストの今。申請データの置き場は無し)
 pub fn build(pg: PgClient) -> App {
+    build_with_files(pg, None)
+}
+
+/// 申請データの置き場 (`files`) を指定して組み立てる
+pub fn build_with_files(pg: PgClient, files: Option<tenko::filing_archives::SharedStore>) -> App {
     let logs = Arc::new(StdMutex::new(Vec::new()));
     let sink = logs.clone();
     let pg = Arc::new(Mutex::new(pg));
@@ -280,6 +285,7 @@ pub fn build(pg: PgClient) -> App {
         log: Arc::new(move |m: &str| sink.lock().unwrap().push(m.to_owned())),
         clock: Arc::new(|| NOW_MS),
         outbox: outbox.clone(),
+        files,
     };
     App {
         router: router().with_state(state),
