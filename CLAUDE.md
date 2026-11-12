@@ -53,12 +53,18 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   遅延 (`overdue::run` が CLAIM で印を付けた予定だけ) を、notify のグループ「点呼の異常」の宛先へ 1 人 1 通。送り手は `send_email` の
   binding `ANOMALY_EMAIL` (destination_address 無し) と変数 `NOTIFY_EMAIL_FROM` (`src/mail.rs`)。遅延のテナントは
   `list_tenko_overdue_tenants()` (migration 212。webhook の設定の有無を見ない) で引く。ログは固定の語だけ。
+- **点呼の事業者・受委託** (`companies.rs`・`consignments.rs`、`/api/tenko/companies`・`/api/tenko/consignments`、admin だけ。alc-migrations 214。Refs ippoan/alc-app#676):
+  事業者は営業所 (`tenko_offices.company_id`) の振り分けと `is_self` (1 テナント 1 行。付け替えは同じ transaction) を持つ。受委託は
+  委託 → 受託の営業所の組で、2 つの事業者が付いていて別であること・到達番号の形・期間 (両方か両方空、5 年未満) を worker が検める。
+  点呼の判定 (alc-measurements-worker) はまだこの表を読まない。**点呼の届出の書き込む値 (`filing-settings`) は `?company_id=` 必須** (表は
+  `tenko_company_filing_settings`、旧 `tenko_filing_settings` は読まない)。申請済みの控えは `company_ids` 付きで返し、
+  `PUT /tenko/filing-archives/{到達番号}/companies` で振り分ける (R2 の list の後に別の短い `tenant_tx` で読む)。
 - **点呼の届出の申請済みの控えの保管** (`filing_archives.rs`、`/api/tenko/filing-archives*`、admin だけ): e-Gov の申請済みの控え (zip) を
   **到達番号で** R2 (binding `TENKO_FILINGS_R2`。本番と staging で別の bucket、env.local は持たない = その 3 口だけ 503) に置く。
   e-Gov の API v2 は申請書・添付を返さず、控えは提出直後に一度しか出ないため。DB に行を持たない (名前・要約・保存した人・時刻は
   customMetadata)。キーは `{tenant_id}/{到達番号}.zip` (同じ到達番号は上書き)。
   置き場の trait (`FileStore`) は crate、R2 の実装は `src/r2.rs` (wasm 専用)。R2 の future は Send でないので `tenant_tx` の中で await しない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 16・admin_db 3・call_db 2・deliver_db 2・failures_db 1・filing_db 2・filing_archives_db 4・fire_db 2・mail_db 3・offices_db 6・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 16・admin_db 3・call_db 2・companies_db 3・consignments_db 2・deliver_db 2・failures_db 1・filing_db 3・filing_archives_db 6・fire_db 2・mail_db 3・offices_db 6・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。

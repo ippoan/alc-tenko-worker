@@ -9,7 +9,10 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Request};
 use futures_util::future::BoxFuture;
 use serde_json::json;
-use support::{assert_logs_clean, build_with_files, rt_client, tenant, App, Got};
+use support::{
+    assert_logs_clean, broken_client, build_with_files, client_as, company, rt_client, tenant, App,
+    Got, READ_ONLY_ROLE,
+};
 use tenko::filing_archives::{
     is_arrive_id, FileStore, SharedStore, StoreError, StoredFile, StoredObject, MAX_BYTES,
 };
@@ -323,7 +326,7 @@ async fn archives_save_list_get() {
     assert_eq!(ids, [ARRIVE2, ARRIVE, old, bare]);
     assert_eq!(
         list[3],
-        json!({ "id": bare, "name": format!("{bare}.zip"), "size": 4, "saved_at": "", "saved_by": null, "meta": null })
+        json!({ "id": bare, "name": format!("{bare}.zip"), "size": 4, "saved_at": "", "saved_by": null, "meta": null, "company_ids": [] })
     );
     assert_eq!(
         (list[2]["meta"].clone(), list[2]["saved_by"].clone()),
@@ -492,7 +495,7 @@ async fn archives_unconfigured_store_is_503() {
         ]
     );
     // ほかの口は動く
-    let got = get(&app, t, "/api/tenko/filing-settings").await;
+    let got = get(&app, t, "/api/tenko/companies").await;
     assert_eq!(got.status, 200);
 }
 
@@ -524,4 +527,134 @@ async fn archives_store_failures_are_500() {
         ]
     );
     assert_logs_clean(&app, &[t.to_string(), name.to_owned(), ARRIVE.to_owned()]);
+}
+
+/// 事業者の振り分けを admin で置き換える (本文は JSON そのまま)
+async fn set_companies(app: &App, tenant: Uuid, role: Option<&str>, id: &str, body: &[u8]) -> Got {
+    send(
+        app,
+        "PUT",
+        &format!("{PATH}/{id}/companies"),
+        tenant,
+        role,
+        &[("Content-Type", h("application/json"))],
+        body.to_vec(),
+    )
+    .await
+}
+
+/// 一覧の中の、到達番号 `id` の `company_ids`
+fn listed_companies(list: &serde_json::Value, id: &str) -> serde_json::Value {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == id)
+        .unwrap()["company_ids"]
+        .clone()
+}
+
+#[tokio::test]
+async fn archives_company_assignment() {
+    let store = Arc::new(Mock::default());
+    let app = with_store(rt_client().await, &store);
+    let t = tenant().await;
+    let other = tenant().await;
+    let ca = company(t, "架空A運輸", true).await;
+    let cb = company(t, "架空B物流", false).await;
+    let foreign = company(other, "架空C", false).await;
+    let body = |ids: &[Uuid]| serde_json::to_vec(&json!({ "company_ids": ids })).unwrap();
+    assert_eq!(put(&app, t, ARRIVE, "", ZIP).await.status, 200);
+    assert_eq!(put(&app, t, ARRIVE2, "", ZIP).await.status, 200);
+
+    // 振り分けが無ければ []
+    let list = get(&app, t, PATH).await.json();
+    assert_eq!(listed_companies(&list, ARRIVE), json!([]));
+
+    // admin 以外 (役の無い要求・admin でない役) は 403
+    for role in [None, Some("viewer")] {
+        let got = set_companies(&app, t, role, ARRIVE, &body(&[ca])).await;
+        assert_eq!(
+            (got.status, got.json()),
+            (403, json!({ "error": "forbidden" }))
+        );
+    }
+
+    // 外れる → 400 (保存しない)
+    for (id, payload, word) in [
+        ("x", body(&[ca]), "invalid_arrive_id"),
+        ("209912312359590", body(&[ca]), "invalid_arrive_id"),
+        (ARRIVE, b"not json".to_vec(), "invalid_body"),
+        (ARRIVE, b"{}".to_vec(), "invalid_body"),
+        (ARRIVE, br#"{"company_ids":["x"]}"#.to_vec(), "invalid_body"),
+        (ARRIVE, body(&[foreign]), "invalid_company"),
+        (ARRIVE, body(&[Uuid::new_v4()]), "invalid_company"),
+        (ARRIVE, body(&[ca, Uuid::new_v4()]), "invalid_company"),
+    ] {
+        let got = set_companies(&app, t, Some("admin"), id, &payload).await;
+        assert_eq!((got.status, got.json()), (400, json!({ "error": word })));
+    }
+    let list = get(&app, t, PATH).await.json();
+    assert_eq!(listed_companies(&list, ARRIVE), json!([]));
+
+    // 置き換え: 重複はまとめ、id の順で返る
+    let mut both = vec![ca, cb];
+    both.sort();
+    let got = set_companies(&app, t, Some("admin"), ARRIVE, &body(&[cb, ca, cb])).await;
+    assert_eq!(
+        (got.status, got.json()),
+        (200, json!({ "id": ARRIVE, "company_ids": both }))
+    );
+    let list = get(&app, t, PATH).await.json();
+    assert_eq!(listed_companies(&list, ARRIVE), json!(both));
+    assert_eq!(listed_companies(&list, ARRIVE2), json!([]));
+    let got = set_companies(&app, t, Some("admin"), ARRIVE, &body(&[ca])).await;
+    assert_eq!(got.json()["company_ids"], json!([ca]));
+    let list = get(&app, t, PATH).await.json();
+    assert_eq!(listed_companies(&list, ARRIVE), json!([ca]));
+
+    // 別のテナントの振り分けは混ざらない (同じ到達番号でも)
+    let got = set_companies(&app, other, Some("admin"), ARRIVE, &body(&[foreign])).await;
+    assert_eq!(got.status, 200);
+    let list = get(&app, t, PATH).await.json();
+    assert_eq!(listed_companies(&list, ARRIVE), json!([ca]));
+
+    // R2 に控えが無くても行だけ置ける (一覧には出ない)。空で全部外れる
+    let bare = "2099123123595903";
+    let got = set_companies(&app, t, Some("admin"), bare, &body(&[cb])).await;
+    assert_eq!(got.status, 200);
+    let list = get(&app, t, PATH).await.json();
+    assert!(list.as_array().unwrap().iter().all(|a| a["id"] != bare));
+    let got = set_companies(&app, t, Some("admin"), ARRIVE, &body(&[])).await;
+    assert_eq!(got.json(), json!({ "id": ARRIVE, "company_ids": [] }));
+    let list = get(&app, t, PATH).await.json();
+    assert_eq!(listed_companies(&list, ARRIVE), json!([]));
+
+    // 置き場が無くても動く (DB だけの口)
+    let no_store = build_with_files(rt_client().await, None);
+    let got = set_companies(&no_store, t, Some("admin"), ARRIVE, &body(&[ca])).await;
+    assert_eq!(got.status, 200);
+    assert!(app.logs().is_empty() && no_store.logs().is_empty());
+}
+
+#[tokio::test]
+async fn archives_company_db_failures() {
+    let store = Arc::new(Mock::default());
+    let t = tenant().await;
+    store.insert(format!("{t}/{ARRIVE}.zip"), b"x", &[]);
+    let ca = company(t, "架空A運輸", true).await;
+    let payload = serde_json::to_vec(&json!({ "company_ids": [ca] })).unwrap();
+
+    // 書けないロール → 一覧は読めて、振り分けの保存は 500
+    let app = with_store(client_as(READ_ONLY_ROLE).await, &store);
+    assert_eq!(get(&app, t, PATH).await.status, 200);
+    let got = set_companies(&app, t, Some("admin"), ARRIVE, &payload).await;
+    assert_eq!((got.status, got.body.len()), (500, 0));
+    assert_eq!(app.logs().len(), 1);
+    assert!(app.logs()[0].starts_with("tenko: filing archive companies failed: db ("));
+    assert_logs_clean(&app, &[t.to_string(), ca.to_string(), ARRIVE.to_owned()]);
+
+    // 置き場は動くが DB が切れた → 一覧は 500
+    let app = with_store(broken_client().await, &store);
+    assert_eq!(get(&app, t, PATH).await.status, 500);
+    assert!(app.logs()[0].starts_with("tenko: filing archive list failed: db ("));
 }

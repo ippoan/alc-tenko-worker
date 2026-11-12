@@ -67,7 +67,7 @@ path = "crates/tenko/src/overdue.rs"
 [[files]]
 path = "crates/tenko/src/fire.rs"
 
-# 点呼の届出・認定申請に差し込む値 (テナント 1 行。tests/filing_db.rs)
+# 点呼の届出・認定申請に差し込む値 (事業者ごとに 1 行。tests/filing_db.rs)
 [[files]]
 path = "crates/tenko/src/filing.rs"
 
@@ -75,6 +75,14 @@ path = "crates/tenko/src/filing.rs"
 # wasm 専用で対象外)
 [[files]]
 path = "crates/tenko/src/filing_archives.rs"
+
+# 点呼の事業者と営業所の振り分け (tests/companies_db.rs。Refs ippoan/alc-app#676)
+[[files]]
+path = "crates/tenko/src/companies.rs"
+
+# 点呼の受委託 (tests/consignments_db.rs。Refs ippoan/alc-app#676)
+[[files]]
+path = "crates/tenko/src/consignments.rs"
 
 # 点呼の営業所と、運行管理者・車両の所属 (tests/offices_db.rs)
 [[files]]
