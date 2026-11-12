@@ -1205,7 +1205,6 @@ dependencies = [
  "csv",
  "futures-util",
  "hmac 0.12.1",
- "percent-encoding",
  "serde",
  "serde_json",
  "sha2 0.10.9",
