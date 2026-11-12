@@ -43,6 +43,16 @@ fn sample() -> serde_json::Value {
         "device_name": "",
         "auto_cert_pre": "前-0001",
         "operator_name": "架空運輸株式会社",
+        "operator_kana": "カクウウンユ",
+        "operator_postal_code": "000-0001",
+        "operator_corporate_number": "0000000000001",
+        "operator_representative_title": "代表取締役",
+        "operator_contact_dept": " 架空課 ",
+        "partners": [
+            { "name": " 架空物流株式会社 ", "address": "架空県架空市2-2", "representative": "", "offices": [
+                { "name": "架空物流 本社営業所", "address": " " }
+            ] }
+        ],
         "applicant_contact_email": "contact@example.com",
         "product_url": "https://example.com/tenko",
         "updated_at": "2000-01-01T00:00:00Z"
@@ -108,6 +118,15 @@ async fn filing_settings_get_put() {
             json!({ "offices": [{ "name": "a", "role": 5 }] }),
             "invalid_office",
         ),
+        (
+            json!({ "operator_postal_code": "12345" }),
+            "invalid_postal_code",
+        ),
+        (
+            json!({ "operator_corporate_number": "123" }),
+            "invalid_corporate_number",
+        ),
+        (json!({ "partners": [{ "name": " " }] }), "invalid_partner"),
     ] {
         let got = call_as(&app, "admin", "PUT", t, Some(body)).await;
         assert_eq!((got.status, got.json()), (400, json!({ "error": word })));
@@ -125,6 +144,31 @@ async fn filing_settings_get_put() {
         json!({ "name": "架空運輸 第二車庫", "address": null, "role": 2 })
     );
     assert_ne!(v["updated_at"], json!("2000-01-01T00:00:00Z"));
+    // 213 の欄: 郵便番号はハイフンを落とす・相手の会社は空白を落として空は null
+    assert_eq!(
+        (
+            v["operator_kana"].clone(),
+            v["operator_postal_code"].clone(),
+            v["operator_corporate_number"].clone(),
+            v["operator_representative_title"].clone(),
+            v["operator_contact_dept"].clone(),
+            v["operator_phone"].clone(),
+        ),
+        (
+            json!("カクウウンユ"),
+            json!("0000001"),
+            json!("0000000000001"),
+            json!("代表取締役"),
+            json!("架空課"),
+            json!(null),
+        )
+    );
+    assert_eq!(
+        v["partners"],
+        json!([{ "name": "架空物流株式会社", "address": "架空県架空市2-2", "representative": null, "offices": [
+            { "name": "架空物流 本社営業所", "address": null }
+        ] }])
+    );
     assert_eq!(call_as(&app, "admin", "GET", t, None).await.json(), v);
 
     // 置き換え: 省略した欄は null / 空に戻る
@@ -145,6 +189,7 @@ async fn filing_settings_get_put() {
         ),
         (json!("架空の機器"), json!([]), json!(null))
     );
+    assert_eq!(again["partners"], json!([]));
 
     // 別のテナントからは見えない
     assert_eq!(

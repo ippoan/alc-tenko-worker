@@ -29,7 +29,7 @@ ippoan/alc-measurements-worker へ移した。Refs ippoan/rust-alc-api#680)
 | `/api/tenko/webhooks` | GET・POST | webhook の設定の一覧・作成か上書き (送信はしない) |
 | `/api/tenko/webhooks/{id}` | GET・DELETE | 設定の 1 件・削除 |
 | `/api/tenko/webhooks/{id}/deliveries` | GET | 配信の記録 (新しい順に 100 件) |
-| `/api/tenko/filing-settings` | GET・PUT | 点呼の届出・認定申請に差し込む値 (テナント 1 行、admin だけ。行が無ければ既定値・PUT は全欄の置き換え) |
+| `/api/tenko/filing-settings` | GET・PUT | 点呼の届出・認定申請に差し込む値 (テナント 1 行、admin だけ。行が無ければ既定値・PUT は全欄の置き換え)。213 の欄 (事業者のフリガナ・郵便番号・電話・法人番号・代表者の役職・担当者の部門名と住所、受委託の相手の会社 `partners`) は画面が e-Gov の申請データと突き合わせるのに使う。郵便番号はハイフンを落として 7 桁 (`invalid_postal_code`)、法人番号は 13 桁 (`invalid_corporate_number`)、相手の会社は 10 社まで (`too_many_partners`)・名称必須 (`invalid_partner`) |
 | `/api/tenko/offices` | GET・POST | 点呼の営業所 (運行管理者・車両の所属つき、4 口とも admin だけ)。GET は `{offices, vehicles, carins_bases}` (未削除の車両と、車検証の使用の本拠+使用者の組の一覧つき。組ごとに営業所を選ぶ。組の値は半角・全角の空白を取り除いて正規化。営業所は所属の点呼端末 `device_ids` つき)・POST は 201 で営業所 1 件 |
 | `/api/tenko/offices/{id}` | PUT・DELETE | 営業所の全部の置き換え (`manager_ids`・`vehicle_ids`・`carins_bases`・`device_ids` も。車両は別の営業所から移る)・削除 (204)。無ければ 404 |
 | `/api/tenko/dashboard` | GET | ダッシュボード (件数と予定超過) |
