@@ -1,11 +1,13 @@
-//! 点呼の届出・自動点呼機器の認定申請に差し込む値 (alc-migrations 201 の `tenko_filing_settings`。テナントに 1 行)。
+//! 点呼の届出・自動点呼機器の認定申請に差し込む値 (alc-migrations 214 の `tenko_company_filing_settings`。事業者 ([`crate::companies`]) ごとに 1 行、
+//! キーは tenant_id と company_id。201・213 の `tenko_filing_settings` (テナントに 1 行) はもう読まない)。
 //! 管理画面 (alc-app の「点呼の届出」) が、この値を様式 (e-Gov の参考様式・別紙7・認定申請の様式1・様式2) に差し込んで
 //! ダウンロードさせる。差し込みはブラウザでするので、ここは値の読み書きだけ。rust-alc-api には無い口。
 //!
-//! - `GET /tenko/filing-settings` — 設定。行が無ければ既定値 (機器の名称 `一歩庵点呼 v1`・営業所なし・ほかは null、`updated_at` は null)
-//! - `PUT /tenko/filing-settings` — 全部の欄を置き換える (省略した欄は null / 空に戻る)。応答は保存後の設定
+//! - `GET /tenko/filing-settings?company_id=<uuid>` — 設定。行が無ければ既定値 (機器の名称 `一歩庵点呼 v1`・営業所なし・ほかは null、`updated_at` は null)
+//! - `PUT /tenko/filing-settings?company_id=<uuid>` — 全部の欄を置き換える (省略した欄は null / 空に戻る)。応答は保存後の設定
 //!
-//! **2 口とも admin だけ** (`X-User-Role` が admin でなければ 403 `forbidden`)。文字列は前後の空白を落とし、空は null にする。
+//! **2 口とも admin だけ** (`X-User-Role` が admin でなければ 403 `forbidden`)。`company_id` が無い・UUID でなければ 400 `company_required`、
+//! テナントに無い事業者は 404。文字列は前後の空白を落とし、空は null にする。
 //! 検める欄: 事業者番号 (半角数字 12 桁)・事業種別 (1〜8)・営業所 (名称は必須、実施・被実施の別は 1〜3、20 件まで)・
 //! 郵便番号 (ハイフンを落として半角数字 7 桁)・法人番号 (半角数字 13 桁)・受委託の相手の会社 (名称は必須、10 社まで、
 //! 営業所は名称が必須で 20 件まで)・長さ (1 欄 500 文字まで)。外れたら 400 `{"error": "<欄>"}`。この表は dev の軸を持たない。
@@ -13,8 +15,8 @@
 //! 画面が e-Gov の申請データ (一時保存・申請済みの控え) と突き合わせるのに使う。
 
 use alc_core_wasm::{AuthUser, TenantId};
-use alc_worker_db::{PgClient, TxOutput};
-use axum::extract::State;
+use alc_worker_db::{PgClient, TenantTx, TxOutput};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -262,26 +264,26 @@ pub mod sql {
          operator_contact_kana, operator_contact_dept, operator_contact_postal_code, operator_contact_address, \
          partners, updated_at";
 
-    /// $1 tenant_id
+    /// $1 tenant_id / $2 company_id
     pub const GET: &str = const_format::concatcp!(
         "SELECT ",
         COLUMNS,
-        " FROM alc_api.tenko_filing_settings WHERE tenant_id = $1"
+        " FROM alc_api.tenko_company_filing_settings WHERE tenant_id = $1 AND company_id = $2"
     );
 
-    /// 全部の欄を置き換える。$1 tenant_id / $2〜$34 は [`COLUMNS`] の updated_at の前までと同じ順
+    /// 全部の欄を置き換える。$1 tenant_id / $2〜$34 は [`COLUMNS`] の updated_at の前までと同じ順 / $35 company_id
     pub const UPSERT: &str = const_format::concatcp!(
-        "INSERT INTO alc_api.tenko_filing_settings (tenant_id, ",
+        "INSERT INTO alc_api.tenko_company_filing_settings (tenant_id, ",
         "business_number, trade_name, business_type, offices, device_name, auto_cert_pre, \
          auto_cert_post, operator_name, operator_address, operator_representative, operator_contact_name, \
          operator_contact_phone, operator_contact_email, applicant_name, applicant_kana, applicant_address, \
          applicant_contact_name, applicant_contact_dept, applicant_contact_phone, applicant_contact_email, product_url, \
          operator_kana, operator_address_kana, operator_postal_code, operator_phone, operator_corporate_number, \
          operator_representative_kana, operator_representative_title, operator_contact_kana, operator_contact_dept, \
-         operator_contact_postal_code, operator_contact_address, partners) \
+         operator_contact_postal_code, operator_contact_address, partners, company_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, \
-         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34) \
-         ON CONFLICT (tenant_id) DO UPDATE SET \
+         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35) \
+         ON CONFLICT (tenant_id, company_id) DO UPDATE SET \
              business_number = EXCLUDED.business_number, trade_name = EXCLUDED.trade_name, \
              business_type = EXCLUDED.business_type, offices = EXCLUDED.offices, device_name = EXCLUDED.device_name, \
              auto_cert_pre = EXCLUDED.auto_cert_pre, auto_cert_post = EXCLUDED.auto_cert_post, \
@@ -354,32 +356,63 @@ fn settings(r: &Row) -> FilingSettings {
     }
 }
 
-pub async fn get_settings(pg: &mut PgClient, tenant_id: Uuid) -> Result<FilingSettings, Error> {
+/// 事業者の設定。事業者がテナントに無ければ `None`、行が無ければ既定値
+pub async fn get_settings(
+    pg: &mut PgClient,
+    tenant_id: Uuid,
+    company_id: Uuid,
+) -> Result<Option<FilingSettings>, Error> {
     pg.tenant_tx(tenant_id, move |tx| {
         Box::pin(async move {
+            if !company_exists(tx, tenant_id, company_id).await? {
+                return Ok(None);
+            }
             let row = tx
-                .query_typed_opt(sql::GET, &[(&tenant_id, Type::UUID)])
+                .query_typed_opt(
+                    sql::GET,
+                    &[(&tenant_id, Type::UUID), (&company_id, Type::UUID)],
+                )
                 .await?;
-            Ok(row
-                .as_ref()
-                .map(settings)
-                .unwrap_or_else(FilingSettings::defaults))
+            Ok(Some(
+                row.as_ref()
+                    .map(settings)
+                    .unwrap_or_else(FilingSettings::defaults),
+            ))
         })
     })
     .await
 }
 
-/// `s` は [`FilingSettings::normalize`] を通したもの
+/// 事業者がテナントに在るか
+async fn company_exists(
+    tx: &TenantTx<'_>,
+    tenant_id: Uuid,
+    company_id: Uuid,
+) -> Result<bool, Error> {
+    Ok(tx
+        .query_typed_opt(
+            crate::companies::sql::EXISTS,
+            &[(&tenant_id, Type::UUID), (&company_id, Type::UUID)],
+        )
+        .await?
+        .is_some())
+}
+
+/// `s` は [`FilingSettings::normalize`] を通したもの。事業者がテナントに無ければ `None` (何も書かない)
 pub async fn put_settings(
     pg: &mut PgClient,
     tenant_id: Uuid,
+    company_id: Uuid,
     s: FilingSettings,
-) -> Result<FilingSettings, Error> {
+) -> Result<Option<FilingSettings>, Error> {
     pg.tenant_tx(tenant_id, move |tx| {
         Box::pin(async move {
+            if !company_exists(tx, tenant_id, company_id).await? {
+                return Ok(None);
+            }
             let offices = serde_json::to_value(&s.offices).unwrap_or_else(|_| json!([]));
             let partners = serde_json::to_value(&s.partners).unwrap_or_else(|_| json!([]));
-            let args: [Arg; 34] = [
+            let args: [Arg; 35] = [
                 (&tenant_id, Type::UUID),
                 (&s.business_number, Type::TEXT),
                 (&s.trade_name, Type::TEXT),
@@ -414,8 +447,11 @@ pub async fn put_settings(
                 (&s.operator_contact_postal_code, Type::TEXT),
                 (&s.operator_contact_address, Type::TEXT),
                 (&partners, Type::JSONB),
+                (&company_id, Type::UUID),
             ];
-            Ok(settings(&tx.query_typed_one(sql::UPSERT, &args).await?))
+            Ok(Some(settings(
+                &tx.query_typed_one(sql::UPSERT, &args).await?,
+            )))
         })
     })
     .await
@@ -435,17 +471,37 @@ pub(crate) fn error(status: StatusCode, word: &'static str) -> Response {
     (status, Json(json!({ "error": word }))).into_response()
 }
 
+/// クエリの `company_id`
+#[derive(Deserialize)]
+struct CompanyQuery {
+    company_id: Option<String>,
+}
+
+impl CompanyQuery {
+    /// 無い・UUID でなければ `None`
+    fn company_id(&self) -> Option<Uuid> {
+        self.company_id
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok())
+    }
+}
+
 async fn get_handler(
     State(state): State<AppState>,
     Extension(TenantId(tenant_id)): Extension<TenantId>,
     auth_user: Option<Extension<AuthUser>>,
+    Query(query): Query<CompanyQuery>,
 ) -> Response {
     if !is_admin(&auth_user) {
         return error(StatusCode::FORBIDDEN, "forbidden");
     }
+    let Some(company_id) = query.company_id() else {
+        return error(StatusCode::BAD_REQUEST, "company_required");
+    };
     let mut pg = state.pg.lock().await;
-    match get_settings(&mut pg, tenant_id).await {
-        Ok(s) => Json(s).into_response(),
+    match get_settings(&mut pg, tenant_id, company_id).await {
+        Ok(Some(s)) => Json(s).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => state.db_fail("filing settings get", &e).into_response(),
     }
 }
@@ -454,11 +510,15 @@ async fn put_handler(
     State(state): State<AppState>,
     Extension(TenantId(tenant_id)): Extension<TenantId>,
     auth_user: Option<Extension<AuthUser>>,
+    Query(query): Query<CompanyQuery>,
     body: axum::body::Bytes,
 ) -> Response {
     if !is_admin(&auth_user) {
         return error(StatusCode::FORBIDDEN, "forbidden");
     }
+    let Some(company_id) = query.company_id() else {
+        return error(StatusCode::BAD_REQUEST, "company_required");
+    };
     let Ok(body) = serde_json::from_slice::<FilingSettings>(&body) else {
         return error(StatusCode::BAD_REQUEST, "invalid_body");
     };
@@ -467,8 +527,9 @@ async fn put_handler(
         Err(word) => return error(StatusCode::BAD_REQUEST, word),
     };
     let mut pg = state.pg.lock().await;
-    match put_settings(&mut pg, tenant_id, body).await {
-        Ok(s) => Json(s).into_response(),
+    match put_settings(&mut pg, tenant_id, company_id, body).await {
+        Ok(Some(s)) => Json(s).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => state.db_fail("filing settings put", &e).into_response(),
     }
 }

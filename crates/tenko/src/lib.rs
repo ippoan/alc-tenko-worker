@@ -16,9 +16,11 @@
 //! - [`call`] — 点呼の電話 (番号・乗務員の管理と、アプリからの登録・点呼の位置の記録)
 //! - [`deliver`] — webhook の送信 (口は [`deliver::Outbox`] に積み、worker が応答の後に `ctx.wait_until` で送る。W7b)
 //! - [`overdue`] — 予定超過の確認 (worker の Cron Trigger が毎分呼ぶ。通知済みの印を先に付けた予定だけ送る。W7c)
-//! - [`filing`] — 点呼の届出・自動点呼機器の認定申請に差し込む値 (テナント 1 行。admin だけ)
+//! - [`filing`] — 点呼の届出・自動点呼機器の認定申請に差し込む値 (事業者ごとに 1 行。admin だけ)
 //! - [`filing_archives`] — e-Gov で出した点呼の届出の申請データ (zip) の保管 (R2。admin だけ。置き場が無ければ 503)
 //! - [`offices`] — 点呼の営業所と、運行管理者・車両の所属 (自動点呼の判定で点呼の方法を決める。権限はテナントのヘッダーだけ)
+//! - [`companies`] — 点呼の事業者と営業所の振り分け (admin だけ。届出の値・申請済みの控えは事業者ごと。Refs ippoan/alc-app#676)
+//! - [`consignments`] — 事業者間遠隔点呼の受委託 (委託の営業所 → 受託の営業所・許可・期間。admin だけ)
 //! - [`fire`] — ほかの worker (測定の口) から点呼の節目の webhook を預かる口 (`/internal/webhooks/fire`。`/api` の外)
 //! - [`mail`] — 点呼の異常 (中断・日常点検の NG・遅延) を notify のグループ「点呼の異常」へメールで知らせる (Refs ippoan/alc-app#676)
 //!
@@ -32,6 +34,8 @@
 
 pub mod baselines;
 pub mod call;
+pub mod companies;
+pub mod consignments;
 pub mod daily_health;
 pub mod dashboard;
 pub mod deliver;
@@ -119,6 +123,8 @@ pub fn router() -> Router<AppState> {
         .merge(filing::router())
         .merge(filing_archives::router())
         .merge(offices::router())
+        .merge(companies::router())
+        .merge(consignments::router())
         .merge(call::tenant_router())
         .route_layer(middleware::from_fn(require_tenant_header))
         .route_layer(middleware::from_fn(with_device_dev_slot));

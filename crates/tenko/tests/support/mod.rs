@@ -50,6 +50,10 @@ pub const TABLES: &[&str] = &[
     "tenko_call_numbers",
     "tenko_call_drivers",
     "tenko_filing_settings",
+    "tenko_companies",
+    "tenko_consignments",
+    "tenko_company_filing_settings",
+    "tenko_filing_archive_companies",
     "tenko_offices",
     "tenko_office_managers",
     "tenko_office_carins_bases",
@@ -293,6 +297,50 @@ pub fn build_with_files(pg: PgClient, files: Option<tenko::filing_archives::Shar
         outbox,
         pg,
     }
+}
+
+/// 事業者を 1 つ作る (superuser で)
+pub async fn company(tenant: Uuid, name: &str, is_self: bool) -> Uuid {
+    admin()
+        .await
+        .query_one(
+            "INSERT INTO alc_api.tenko_companies (tenant_id, name, is_self) VALUES ($1, $2, $3) RETURNING id",
+            &[&tenant, &name, &is_self],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// 営業所を 1 つ作る (superuser で。`company` が在れば事業者に振り分ける)
+pub async fn office(tenant: Uuid, name: &str, company: Option<Uuid>) -> Uuid {
+    admin()
+        .await
+        .query_one(
+            "INSERT INTO alc_api.tenko_offices (tenant_id, name, company_id) VALUES ($1, $2, $3) RETURNING id",
+            &[&tenant, &name, &company],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// admin として打つ (auth-worker と同じ利用者の 3 つのヘッダーを付ける)。`role` を変えて 403 も通せる
+pub async fn call_role(
+    app: &App,
+    role: &str,
+    method: &str,
+    uri: &str,
+    tenant: Uuid,
+    body: Option<serde_json::Value>,
+) -> Got {
+    let id = Uuid::new_v4().to_string();
+    let headers = [
+        ("X-User-ID", id.as_str()),
+        ("X-User-Email", "tenko-test@example.com"),
+        ("X-User-Role", role),
+    ];
+    call_with(app, method, uri, Some(tenant), &headers, body).await
 }
 
 /// 社員を 1 人作る (superuser で)

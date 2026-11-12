@@ -11,8 +11,14 @@
 //! - `GET /tenko/filing-archives` — テナントの保管の一覧 (`saved_at` の新しい順、[`MAX_LIST`] 件まで)
 //! - `GET /tenko/filing-archives/{到達番号}` — zip を返す (`Content-Disposition: attachment` で元のファイル名)
 //!
-//! **3 口とも admin だけ** (`X-User-Role` が admin でなければ 403 `forbidden`。[`crate::filing`] と同じ)。置き場が無ければ
-//! (R2 の binding の無いローカルなど) この 3 口だけ 503。DB に行を持たない (保管の要約は R2 の customMetadata に置く)。
+//! - `PUT /tenko/filing-archives/{到達番号}/companies` — 本文 `{"company_ids": [uuid…]}`。控えをどの事業者に見せるかの置き換え
+//!   (alc-migrations 214 の `tenko_filing_archive_companies`)。応答は 200 `{"id", "company_ids"}`。R2 に控えが無くてもよい (行だけ。
+//!   置き場が無くても動く)。到達番号の形が違えば 400 `invalid_arrive_id`、本文が読めなければ 400 `invalid_body`、テナントに無い事業者は 400 `invalid_company`。
+//!   一覧の 1 件には `"company_ids"` (振り分けが無ければ `[]`) が付く。R2 の list の後に別の短い transaction で読む (R2 の await を transaction の中に入れない)
+//!
+//! **4 口とも admin だけ** (`X-User-Role` が admin でなければ 403 `forbidden`。[`crate::filing`] と同じ)。置き場が無ければ
+//! (R2 の binding の無いローカルなど) 保存・一覧・取得の 3 口だけ 503。控えの本体は DB に行を持たない (保管の要約は R2 の customMetadata に置く。
+//! DB に持つのは事業者への振り分けだけ)。
 //! R2 のキーは `{tenant_id}/{到達番号}.zip`、id は到達番号そのもの ([`is_arrive_id`] の形)。
 //! ログは固定の語だけ (ファイル名・キー・テナント・到達番号を出さない)。
 
@@ -20,16 +26,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use alc_core_wasm::{AuthUser, TenantId};
+use alc_worker_db::PgClient;
 use axum::body::Body;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, SecondsFormat};
 use futures_util::future::BoxFuture;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio_postgres::types::Type;
 use uuid::Uuid;
 
 use crate::filing::{error, is_admin};
@@ -98,6 +107,98 @@ pub struct Archive {
     pub saved_at: String,
     pub saved_by: Option<String>,
     pub meta: serde_json::Value,
+}
+
+/// 一覧の 1 件 (保管 + 見せる事業者)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Listed {
+    #[serde(flatten)]
+    pub archive: Archive,
+    pub company_ids: Vec<Uuid>,
+}
+
+/// `PUT .../companies` の本文
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CompaniesInput {
+    pub company_ids: Vec<Uuid>,
+}
+
+pub mod sql {
+    /// 控えの振り分け (arrive_id, company_id)。$1 tenant_id / $2 到達番号の配列
+    pub const LIST: &str =
+        "SELECT arrive_id, company_id FROM alc_api.tenko_filing_archive_companies \
+         WHERE tenant_id = $1 AND arrive_id = ANY($2::text[]) ORDER BY arrive_id, company_id";
+
+    /// テナントの事業者の数。$1 tenant_id / $2 事業者の id の配列
+    pub const COMPANY_COUNT: &str =
+        "SELECT count(*) FROM alc_api.tenko_companies WHERE tenant_id = $1 AND id = ANY($2)";
+
+    /// 控えの振り分けを全部外す。$1 tenant_id / $2 到達番号
+    pub const CLEAR: &str = "DELETE FROM alc_api.tenko_filing_archive_companies \
+         WHERE tenant_id = $1 AND arrive_id = $2";
+
+    /// $1 tenant_id / $2 到達番号 / $3 事業者の id の配列
+    pub const ADD: &str =
+        "INSERT INTO alc_api.tenko_filing_archive_companies (tenant_id, arrive_id, company_id) \
+         SELECT $1, $2, unnest($3::uuid[])";
+}
+
+/// 到達番号ごとの事業者 (R2 の await の後に、別の短い transaction で読む)
+pub async fn company_ids_of(
+    pg: &mut PgClient,
+    tenant_id: Uuid,
+    ids: Vec<String>,
+) -> Result<Vec<(String, Uuid)>, tokio_postgres::Error> {
+    pg.tenant_tx(tenant_id, move |tx| {
+        Box::pin(async move {
+            let rows = tx
+                .query_typed(
+                    sql::LIST,
+                    &[(&tenant_id, Type::UUID), (&ids, Type::TEXT_ARRAY)],
+                )
+                .await?;
+            Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+        })
+    })
+    .await
+}
+
+/// 控えの振り分けを置き換える。テナントに無い事業者が混じっていれば false (何も書かない)。`company_ids` は整列・重複なし
+pub async fn set_companies(
+    pg: &mut PgClient,
+    tenant_id: Uuid,
+    arrive_id: String,
+    company_ids: Vec<Uuid>,
+) -> Result<bool, tokio_postgres::Error> {
+    pg.tenant_tx(tenant_id, move |tx| {
+        Box::pin(async move {
+            let found = tx
+                .query_typed_one(
+                    sql::COMPANY_COUNT,
+                    &[(&tenant_id, Type::UUID), (&company_ids, Type::UUID_ARRAY)],
+                )
+                .await?;
+            if found.get::<_, i64>(0) != company_ids.len() as i64 {
+                return Ok(false);
+            }
+            tx.execute_typed(
+                sql::CLEAR,
+                &[(&tenant_id, Type::UUID), (&arrive_id, Type::TEXT)],
+            )
+            .await?;
+            tx.execute_typed(
+                sql::ADD,
+                &[
+                    (&tenant_id, Type::UUID),
+                    (&arrive_id, Type::TEXT),
+                    (&company_ids, Type::UUID_ARRAY),
+                ],
+            )
+            .await?;
+            Ok(true)
+        })
+    })
+    .await
 }
 
 impl Archive {
@@ -203,6 +304,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/tenko/filing-archives/{id}",
             get(get_handler).put(put_handler),
+        )
+        .route(
+            "/tenko/filing-archives/{id}/companies",
+            put(companies_handler),
         )
 }
 
@@ -314,7 +419,55 @@ async fn list_handler(
         .collect();
     archives.sort_by(|a, b| (&b.saved_at, &b.id).cmp(&(&a.saved_at, &a.id)));
     archives.truncate(MAX_LIST);
-    Json(archives).into_response()
+    // 事業者の振り分けは R2 の list の後に、別の短い transaction で読む
+    let ids = archives.iter().map(|a| a.id.clone()).collect();
+    let rows = {
+        let mut pg = state.pg.lock().await;
+        match company_ids_of(&mut pg, tenant_id, ids).await {
+            Ok(r) => r,
+            Err(e) => return state.db_fail(stage, &e).into_response(),
+        }
+    };
+    let listed: Vec<Listed> = archives
+        .into_iter()
+        .map(|archive| Listed {
+            company_ids: rows
+                .iter()
+                .filter(|(id, _)| *id == archive.id)
+                .map(|(_, c)| *c)
+                .collect(),
+            archive,
+        })
+        .collect();
+    Json(listed).into_response()
+}
+
+async fn companies_handler(
+    State(state): State<AppState>,
+    Extension(TenantId(tenant_id)): Extension<TenantId>,
+    auth_user: Option<Extension<AuthUser>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if !is_admin(&auth_user) {
+        return error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    if !is_arrive_id(&id) {
+        return error(StatusCode::BAD_REQUEST, "invalid_arrive_id");
+    }
+    let Ok(mut input) = serde_json::from_slice::<CompaniesInput>(&body) else {
+        return error(StatusCode::BAD_REQUEST, "invalid_body");
+    };
+    input.company_ids.sort_unstable();
+    input.company_ids.dedup();
+    let mut pg = state.pg.lock().await;
+    match set_companies(&mut pg, tenant_id, id.clone(), input.company_ids.clone()).await {
+        Ok(true) => Json(json!({ "id": id, "company_ids": input.company_ids })).into_response(),
+        Ok(false) => error(StatusCode::BAD_REQUEST, "invalid_company"),
+        Err(e) => state
+            .db_fail("filing archive companies", &e)
+            .into_response(),
+    }
 }
 
 async fn get_handler(
