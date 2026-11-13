@@ -6,7 +6,7 @@ path・method・JSON の形・status は rust と同じ (alc-app の管理画面
 W7a 読み取りと管理 / W7b webhook の送信 (点呼のセッションは alc-measurements-worker へ移した) /
 **W7c 予定超過の確認を Cron Trigger (毎分) へ (通知済みの印を先に付けた行だけ送る)**。点呼の記録の入口は worker 移行の後に
 測定の口 (alc-measurements-worker) へ一本化する (オーナーの決定。段の口はそれまでのつなぎ)。
-口の一覧は README。auth-worker の振り分け (`ALC_BINDING_ROUTES`) は別の PR。
+構造は `.claude/skills/alc-tenko-worker-map`、口の一覧は README。auth-worker の振り分け (`ALC_BINDING_ROUTES`) は別の PR。
 
 ## コマンド
 ```bash
@@ -64,7 +64,9 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   e-Gov の API v2 は申請書・添付を返さず、控えは提出直後に一度しか出ないため。DB に行を持たない (名前・要約・保存した人・時刻は
   customMetadata)。キーは `{tenant_id}/{到達番号}.zip` (同じ到達番号は上書き)。
   置き場の trait (`FileStore`) は crate、R2 の実装は `src/r2.rs` (wasm 専用)。R2 の future は Send でないので `tenant_tx` の中で await しない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 16・admin_db 3・call_db 2・companies_db 3・consignments_db 2・deliver_db 2・failures_db 1・filing_db 3・filing_archives_db 6・fire_db 2・mail_db 3・offices_db 7・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
+- **点呼の届出の申請の下書き** (`filings.rs`、`/api/tenko/filings*`、admin だけ、migration 215): 営業所は `tenko_offices` の写し、
+  PATCH (到達番号を付ける) は同じ transaction で `tenko_filing_archive_companies` に追記 (ON CONFLICT DO NOTHING)、下書き (到達番号なし) だけ消せる。
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 18・admin_db 3・call_db 2・companies_db 3・consignments_db 2・deliver_db 2・failures_db 1・filing_db 4・filings_db 2・filing_archives_db 6・fire_db 2・mail_db 3・offices_db 7・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。
