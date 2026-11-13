@@ -8,11 +8,16 @@
 //!
 //! **2 口とも admin だけ** (`X-User-Role` が admin でなければ 403 `forbidden`)。`company_id` が無い・UUID でなければ 400 `company_required`、
 //! テナントに無い事業者は 404。文字列は前後の空白を落とし、空は null にする。
-//! 検める欄: 事業者番号 (半角数字 12 桁)・事業種別 (1〜8)・営業所 (名称は必須、実施・被実施の別は 1〜3、20 件まで)・
-//! 郵便番号 (ハイフンを落として半角数字 7 桁)・法人番号 (半角数字 13 桁)・受委託の相手の会社 (名称は必須、10 社まで、
-//! 営業所は名称が必須で 20 件まで)・長さ (1 欄 500 文字まで)。外れたら 400 `{"error": "<欄>"}`。この表は dev の軸を持たない。
+//! 検める欄: 事業者番号 (半角数字 12 桁)・事業種別 (1〜8)・営業所 (`office_id` が無ければ名称は必須、実施・被実施の別は 1〜3、
+//! 20 件まで。`office_id` がテナントの点呼の営業所でなければ `invalid_office`)・郵便番号 (ハイフンを落として半角数字 7 桁)・
+//! 法人番号 (半角数字 13 桁)・長さ (1 欄 500 文字まで)。外れたら 400 `{"error": "<欄>"}`。この表は dev の軸を持たない。
+//! 営業所の `office_id` は点呼の営業所 (`tenko_offices`) の id で、名称・住所は保存時に写し、応答では今の値に引き直す (Refs ippoan/alc-app#676)。
+//! **受委託の相手の会社 (`partners`) は書かない** (本文の値は読まない): 応答の `partners` は、`office_id` の在る営業所のうち
+//! 事業者がこの事業者以外のものから事業者ごとに導く ([`refresh`])。`office_id` の在る営業所が無い (旧形式だけの) 行は保存してある値を返す。
 //! フリガナ・郵便番号・電話・法人番号・代表者の役職・担当者の部門名と住所・相手の会社 (partners) は 213 で足した欄で、
 //! 画面が e-Gov の申請データ (一時保存・申請済みの控え) と突き合わせるのに使う。
+
+use std::collections::HashMap;
 
 use alc_core_wasm::{AuthUser, TenantId};
 use alc_worker_db::{PgClient, TenantTx, TxOutput};
@@ -37,12 +42,14 @@ pub const DEFAULT_DEVICE_NAME: &str = "一歩庵点呼 v1";
 pub const MAX_OFFICES: usize = 20;
 /// 1 欄の文字数の上限
 pub const MAX_CHARS: usize = 500;
-/// 受委託の相手の会社の件数の上限
-pub const MAX_PARTNERS: usize = 10;
-
-/// 点呼に係る営業所又は車庫 (参考様式の申請 1 件ぶん)。`role` は #17 の 1 実施 / 2 被実施 / 3 実施・被実施両方
+/// 点呼に係る営業所又は車庫 (参考様式の申請 1 件ぶん)。`role` は #17 の 1 実施 / 2 被実施 / 3 実施・被実施両方。
+/// `office_id` は点呼の営業所 (`tenko_offices`) の id で、在れば名称・住所は保存時にマスタから写し、読むときは今の値に引き直す
+/// (営業所が消えていれば写しのまま)。無い要素 (旧形式) は名称・住所を手で持つ
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Office {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office_id: Option<Uuid>,
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub address: Option<String>,
@@ -200,7 +207,7 @@ impl FilingSettings {
         for o in &mut self.offices {
             o.name = o.name.trim().to_owned();
             o.address = clean(o.address.take());
-            if o.name.is_empty() || !(1..=3).contains(&o.role) {
+            if (o.name.is_empty() && o.office_id.is_none()) || !(1..=3).contains(&o.role) {
                 return Err("invalid_office");
             }
             if o.name.chars().count() > MAX_CHARS
@@ -208,34 +215,6 @@ impl FilingSettings {
                     .as_ref()
                     .is_some_and(|a| a.chars().count() > MAX_CHARS)
             {
-                return Err("too_long");
-            }
-        }
-        if self.partners.len() > MAX_PARTNERS {
-            return Err("too_many_partners");
-        }
-        for p in &mut self.partners {
-            p.name = p.name.trim().to_owned();
-            p.address = clean(p.address.take());
-            p.representative = clean(p.representative.take());
-            if p.name.is_empty() || p.offices.len() > MAX_OFFICES {
-                return Err("invalid_partner");
-            }
-            for o in &mut p.offices {
-                o.name = o.name.trim().to_owned();
-                o.address = clean(o.address.take());
-                if o.name.is_empty() {
-                    return Err("invalid_partner");
-                }
-            }
-            let texts = [Some(&p.name), p.address.as_ref(), p.representative.as_ref()]
-                .into_iter()
-                .chain(
-                    p.offices
-                        .iter()
-                        .flat_map(|o| [Some(&o.name), o.address.as_ref()]),
-                );
-            if texts.flatten().any(|t| t.chars().count() > MAX_CHARS) {
                 return Err("too_long");
             }
         }
@@ -271,7 +250,8 @@ pub mod sql {
         " FROM alc_api.tenko_company_filing_settings WHERE tenant_id = $1 AND company_id = $2"
     );
 
-    /// 全部の欄を置き換える。$1 tenant_id / $2〜$34 は [`COLUMNS`] の updated_at の前までと同じ順 / $35 company_id
+    /// 全部の欄を置き換える (partners は書かない。読むときに営業所から導く)。$1 tenant_id / $2〜$33 は [`COLUMNS`] の
+    /// partners の前までと同じ順 / $34 company_id
     pub const UPSERT: &str = const_format::concatcp!(
         "INSERT INTO alc_api.tenko_company_filing_settings (tenant_id, ",
         "business_number, trade_name, business_type, offices, device_name, auto_cert_pre, \
@@ -280,9 +260,9 @@ pub mod sql {
          applicant_contact_name, applicant_contact_dept, applicant_contact_phone, applicant_contact_email, product_url, \
          operator_kana, operator_address_kana, operator_postal_code, operator_phone, operator_corporate_number, \
          operator_representative_kana, operator_representative_title, operator_contact_kana, operator_contact_dept, \
-         operator_contact_postal_code, operator_contact_address, partners, company_id) \
+         operator_contact_postal_code, operator_contact_address, company_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, \
-         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35) \
+         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34) \
          ON CONFLICT (tenant_id, company_id) DO UPDATE SET \
              business_number = EXCLUDED.business_number, trade_name = EXCLUDED.trade_name, \
              business_type = EXCLUDED.business_type, offices = EXCLUDED.offices, device_name = EXCLUDED.device_name, \
@@ -307,11 +287,21 @@ pub mod sql {
              operator_contact_kana = EXCLUDED.operator_contact_kana, \
              operator_contact_dept = EXCLUDED.operator_contact_dept, \
              operator_contact_postal_code = EXCLUDED.operator_contact_postal_code, \
-             operator_contact_address = EXCLUDED.operator_contact_address, \
-             partners = EXCLUDED.partners, updated_at = NOW() \
+             operator_contact_address = EXCLUDED.operator_contact_address, updated_at = NOW() \
          RETURNING ",
         COLUMNS
     );
+
+    /// テナントの営業所の名称・住所・事業者。$1 tenant_id / $2 営業所の id の配列
+    pub const OFFICES: &str = "SELECT id, name, address, company_id FROM alc_api.tenko_offices \
+         WHERE tenant_id = $1 AND id = ANY($2)";
+
+    /// 受委託の相手の事業者の名称・住所・代表者 (書き込む値の事業者の欄、無ければ事業者の名称)。$1 tenant_id / $2 事業者の id の配列
+    pub const PARTNERS: &str = "SELECT c.id, COALESCE(f.operator_name, c.name), f.operator_address, \
+             f.operator_representative \
+         FROM alc_api.tenko_companies c \
+         LEFT JOIN alc_api.tenko_company_filing_settings f ON f.tenant_id = c.tenant_id AND f.company_id = c.id \
+         WHERE c.tenant_id = $1 AND c.id = ANY($2)";
 }
 
 fn settings(r: &Row) -> FilingSettings {
@@ -373,11 +363,12 @@ pub async fn get_settings(
                     &[(&tenant_id, Type::UUID), (&company_id, Type::UUID)],
                 )
                 .await?;
-            Ok(Some(
-                row.as_ref()
-                    .map(settings)
-                    .unwrap_or_else(FilingSettings::defaults),
-            ))
+            let mut s = row
+                .as_ref()
+                .map(settings)
+                .unwrap_or_else(FilingSettings::defaults);
+            refresh(tx, tenant_id, company_id, &mut s).await?;
+            Ok(Some(s))
         })
     })
     .await
@@ -398,21 +389,107 @@ async fn company_exists(
         .is_some())
 }
 
-/// `s` は [`FilingSettings::normalize`] を通したもの。事業者がテナントに無ければ `None` (何も書かない)
+/// `office_id` の在る営業所の名称・住所を今のマスタの値にし、`partners` を導く。テナントに無い (消えた) 営業所は写しのまま
+/// にして false を返す。`office_id` の在る営業所が 1 つも無ければ何もしない (`partners` は保存した値のまま)。
+///
+/// `partners` は、営業所の事業者が `company_id` 以外のものを事業者ごとに (営業所の並びで最初に出た順) まとめ、事業者の名称・住所・
+/// 代表者 (その事業者の書き込む値の `operator_*`、名称が無ければ事業者の名称) と営業所の名称・住所を入れる
+async fn refresh(
+    tx: &TenantTx<'_>,
+    tenant_id: Uuid,
+    company_id: Uuid,
+    s: &mut FilingSettings,
+) -> Result<bool, Error> {
+    let ids: Vec<Uuid> = s.offices.iter().filter_map(|o| o.office_id).collect();
+    if ids.is_empty() {
+        return Ok(true);
+    }
+    let found: HashMap<Uuid, (String, Option<String>, Option<Uuid>)> = tx
+        .query_typed(
+            sql::OFFICES,
+            &[(&tenant_id, Type::UUID), (&ids, Type::UUID_ARRAY)],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get(0), (r.get(1), r.get(2), r.get(3))))
+        .collect();
+    let mut all = true;
+    let mut groups: Vec<(Uuid, Vec<PartnerOffice>)> = Vec::new();
+    for o in &mut s.offices {
+        let Some(id) = o.office_id else { continue };
+        let Some((name, address, owner)) = found.get(&id) else {
+            all = false;
+            continue;
+        };
+        o.name = name.clone();
+        o.address = address.clone();
+        let Some(owner) = owner.filter(|c| *c != company_id) else {
+            continue;
+        };
+        let po = PartnerOffice {
+            name: name.clone(),
+            address: address.clone(),
+        };
+        match groups.iter_mut().find(|(c, _)| *c == owner) {
+            Some((_, offices)) => offices.push(po),
+            None => groups.push((owner, vec![po])),
+        }
+    }
+    let owners: Vec<Uuid> = groups.iter().map(|(c, _)| *c).collect();
+    let heads: HashMap<Uuid, (String, Option<String>, Option<String>)> = tx
+        .query_typed(
+            sql::PARTNERS,
+            &[(&tenant_id, Type::UUID), (&owners, Type::UUID_ARRAY)],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get(0), (r.get(1), r.get(2), r.get(3))))
+        .collect();
+    s.partners = groups
+        .into_iter()
+        .filter_map(|(c, offices)| {
+            let (name, address, representative) = heads.get(&c)?.clone();
+            Some(Partner {
+                name,
+                address,
+                representative,
+                offices,
+            })
+        })
+        .collect();
+    Ok(all)
+}
+
+/// 保存の結果
+#[derive(Debug, Clone, PartialEq)]
+pub enum Put {
+    Done(Box<FilingSettings>),
+    /// 事業者がテナントに無い (何も書かない)
+    NotFound,
+    /// `office_id` がテナントの営業所でない (何も書かない)
+    InvalidOffice,
+}
+
+impl TxOutput for Put {}
+
+/// `s` は [`FilingSettings::normalize`] を通したもの。本文の `partners` は読まない (営業所から導く)
 pub async fn put_settings(
     pg: &mut PgClient,
     tenant_id: Uuid,
     company_id: Uuid,
-    s: FilingSettings,
-) -> Result<Option<FilingSettings>, Error> {
+    mut s: FilingSettings,
+) -> Result<Put, Error> {
     pg.tenant_tx(tenant_id, move |tx| {
         Box::pin(async move {
             if !company_exists(tx, tenant_id, company_id).await? {
-                return Ok(None);
+                return Ok(Put::NotFound);
+            }
+            // office_id の在る営業所は、名称・住所をマスタから写して保存する
+            if !refresh(tx, tenant_id, company_id, &mut s).await? {
+                return Ok(Put::InvalidOffice);
             }
             let offices = serde_json::to_value(&s.offices).unwrap_or_else(|_| json!([]));
-            let partners = serde_json::to_value(&s.partners).unwrap_or_else(|_| json!([]));
-            let args: [Arg; 35] = [
+            let args: [Arg; 34] = [
                 (&tenant_id, Type::UUID),
                 (&s.business_number, Type::TEXT),
                 (&s.trade_name, Type::TEXT),
@@ -446,12 +523,11 @@ pub async fn put_settings(
                 (&s.operator_contact_dept, Type::TEXT),
                 (&s.operator_contact_postal_code, Type::TEXT),
                 (&s.operator_contact_address, Type::TEXT),
-                (&partners, Type::JSONB),
                 (&company_id, Type::UUID),
             ];
-            Ok(Some(settings(
-                &tx.query_typed_one(sql::UPSERT, &args).await?,
-            )))
+            let mut out = settings(&tx.query_typed_one(sql::UPSERT, &args).await?);
+            refresh(tx, tenant_id, company_id, &mut out).await?;
+            Ok(Put::Done(Box::new(out)))
         })
     })
     .await
@@ -473,13 +549,13 @@ pub(crate) fn error(status: StatusCode, word: &'static str) -> Response {
 
 /// クエリの `company_id`
 #[derive(Deserialize)]
-struct CompanyQuery {
+pub(crate) struct CompanyQuery {
     company_id: Option<String>,
 }
 
 impl CompanyQuery {
     /// 無い・UUID でなければ `None`
-    fn company_id(&self) -> Option<Uuid> {
+    pub(crate) fn company_id(&self) -> Option<Uuid> {
         self.company_id
             .as_deref()
             .and_then(|s| Uuid::parse_str(s).ok())
@@ -528,8 +604,9 @@ async fn put_handler(
     };
     let mut pg = state.pg.lock().await;
     match put_settings(&mut pg, tenant_id, company_id, body).await {
-        Ok(Some(s)) => Json(s).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Put::Done(s)) => Json(s).into_response(),
+        Ok(Put::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Put::InvalidOffice) => error(StatusCode::BAD_REQUEST, "invalid_office"),
         Err(e) => state.db_fail("filing settings put", &e).into_response(),
     }
 }
@@ -538,24 +615,9 @@ async fn put_handler(
 mod tests {
     use super::*;
 
-    fn partner(name: &str, offices: Vec<PartnerOffice>) -> Partner {
-        Partner {
-            name: name.to_owned(),
-            address: None,
-            representative: None,
-            offices,
-        }
-    }
-
-    fn poffice(name: &str) -> PartnerOffice {
-        PartnerOffice {
-            name: name.to_owned(),
-            address: None,
-        }
-    }
-
     fn office(name: &str, role: i16) -> Office {
         Office {
+            office_id: None,
             name: name.to_owned(),
             address: None,
             role,
@@ -569,6 +631,7 @@ mod tests {
             trade_name: Some("   ".to_owned()),
             device_name: Some(" ".to_owned()),
             offices: vec![Office {
+                office_id: None,
                 name: " 本社営業所 ".to_owned(),
                 address: Some(" ".to_owned()),
                 role: 1,
@@ -583,6 +646,37 @@ mod tests {
         assert_eq!(s.device_name.as_deref(), Some(DEFAULT_DEVICE_NAME));
         assert_eq!(s.offices, vec![office("本社営業所", 1)]);
         assert_eq!(s.updated_at, None);
+    }
+
+    #[test]
+    fn normalize_lets_an_office_id_go_without_a_name() {
+        let o = Office {
+            office_id: Some(Uuid::nil()),
+            ..office(" ", 2)
+        };
+        let s = FilingSettings {
+            offices: vec![o.clone()],
+            ..FilingSettings::default()
+        }
+        .normalize()
+        .unwrap();
+        assert_eq!(
+            s.offices,
+            vec![Office {
+                name: String::new(),
+                ..o.clone()
+            }]
+        );
+        // 役は office_id が在っても検める
+        assert_eq!(
+            FilingSettings {
+                offices: vec![Office { role: 0, ..o }],
+                ..FilingSettings::default()
+            }
+            .normalize()
+            .unwrap_err(),
+            "invalid_office"
+        );
     }
 
     #[test]
@@ -671,49 +765,6 @@ mod tests {
                 "invalid_corporate_number"
             );
         }
-        assert_eq!(
-            bad(FilingSettings {
-                partners: vec![partner("a", vec![]); MAX_PARTNERS + 1],
-                ..base()
-            }),
-            "too_many_partners"
-        );
-        for p in [
-            partner(" ", vec![]),
-            partner("a", vec![poffice(" ")]),
-            partner("a", vec![poffice("b"); MAX_OFFICES + 1]),
-        ] {
-            assert_eq!(
-                bad(FilingSettings {
-                    partners: vec![p],
-                    ..base()
-                }),
-                "invalid_partner"
-            );
-        }
-        for p in [
-            partner(&long, vec![]),
-            Partner {
-                representative: Some(long.clone()),
-                ..partner("a", vec![])
-            },
-            partner("a", vec![poffice(&long)]),
-            partner(
-                "a",
-                vec![PartnerOffice {
-                    address: Some(long.clone()),
-                    ..poffice("b")
-                }],
-            ),
-        ] {
-            assert_eq!(
-                bad(FilingSettings {
-                    partners: vec![p],
-                    ..base()
-                }),
-                "too_long"
-            );
-        }
         // 郵便番号のハイフン (半角・全角) は落とす
         let s = FilingSettings {
             operator_postal_code: Some("856－0044".to_owned()),
@@ -728,10 +779,6 @@ mod tests {
         );
         // 上限ちょうどは通る
         assert!(FilingSettings {
-            partners: vec![
-                partner(&"あ".repeat(MAX_CHARS), vec![poffice("b"); MAX_OFFICES]);
-                MAX_PARTNERS
-            ],
             business_type: Some(8),
             offices: vec![office(&"あ".repeat(MAX_CHARS), 3); MAX_OFFICES],
             ..base()

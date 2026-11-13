@@ -54,6 +54,7 @@ pub const TABLES: &[&str] = &[
     "tenko_consignments",
     "tenko_company_filing_settings",
     "tenko_filing_archive_companies",
+    "tenko_filings",
     "tenko_offices",
     "tenko_office_managers",
     "tenko_office_carins_bases",

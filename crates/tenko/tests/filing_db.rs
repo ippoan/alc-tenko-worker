@@ -5,7 +5,7 @@ mod support;
 use serde_json::json;
 use support::{
     admin, app, assert_logs_clean, broken_client, build, call, call_with, client_as, company,
-    tenant, READ_ONLY_ROLE,
+    office, tenant, READ_ONLY_ROLE,
 };
 use uuid::Uuid;
 
@@ -162,7 +162,6 @@ async fn filing_settings_get_put() {
             json!({ "operator_corporate_number": "123" }),
             "invalid_corporate_number",
         ),
-        (json!({ "partners": [{ "name": " " }] }), "invalid_partner"),
     ] {
         let got = call_as(&app, "admin", "PUT", t, c, Some(body)).await;
         assert_eq!((got.status, got.json()), (400, json!({ "error": word })));
@@ -180,7 +179,7 @@ async fn filing_settings_get_put() {
         json!({ "name": "架空運輸 第二車庫", "address": null, "role": 2 })
     );
     assert_ne!(v["updated_at"], json!("2000-01-01T00:00:00Z"));
-    // 213 の欄: 郵便番号はハイフンを落とす・相手の会社は空白を落として空は null
+    // 213 の欄: 郵便番号はハイフンを落とす
     assert_eq!(
         (
             v["operator_kana"].clone(),
@@ -199,12 +198,8 @@ async fn filing_settings_get_put() {
             json!(null),
         )
     );
-    assert_eq!(
-        v["partners"],
-        json!([{ "name": "架空物流株式会社", "address": "架空県架空市2-2", "representative": null, "offices": [
-            { "name": "架空物流 本社営業所", "address": null }
-        ] }])
-    );
+    // 本文の相手の会社は読まない (400 にもしない)。office_id の在る営業所が無いので保存してある値 (空) のまま
+    assert_eq!(v["partners"], json!([]));
     assert_eq!(call_as(&app, "admin", "GET", t, c, None).await.json(), v);
 
     // 置き換え: 省略した欄は null / 空に戻る
@@ -374,5 +369,228 @@ async fn filing_settings_are_per_company() {
         (json!("架空機器A2"), json!("架空機器B"))
     );
     assert_eq!(rows(t).await, 2);
+    assert!(app.logs().is_empty());
+}
+
+/// 営業所の office_id: 保存時に名称・住所を写し、読むときは今の値に引き直す。相手の会社は他社の営業所から導く
+#[tokio::test]
+async fn filing_settings_offices_from_master() {
+    let app = app().await;
+    let t = tenant().await;
+    let other = tenant().await;
+    let ca = company(t, "架空A運輸", true).await;
+    let cb = company(t, "架空B物流", false).await;
+    let cc = company(t, "架空C倉庫", false).await;
+    let oa = office(t, "架空A 本社営業所", Some(ca)).await;
+    let ob1 = office(t, "架空B 第一営業所", Some(cb)).await;
+    let ob2 = office(t, "架空B 第二営業所", Some(cb)).await;
+    let oc = office(t, "架空C 営業所", Some(cc)).await;
+    let free = office(t, "架空 無所属の車庫", None).await;
+    let gone = office(t, "架空 消す営業所", Some(cb)).await;
+    let foreign = office(other, "架空X 営業所", None).await;
+    let admin_db = admin().await;
+    admin_db
+        .execute(
+            "UPDATE alc_api.tenko_offices SET address = '架空県架空市1-1' WHERE id = $1",
+            &[&oa],
+        )
+        .await
+        .unwrap();
+    // 相手の事業者 B は書き込む値の operator_* を持つ。C は持たない (名称は事業者の名称)
+    admin_db
+        .execute(
+            "INSERT INTO alc_api.tenko_company_filing_settings \
+             (tenant_id, company_id, operator_name, operator_address, operator_representative) \
+             VALUES ($1, $2, '架空B物流株式会社', '架空県架空市2-2', '架空 次郎')",
+            &[&t, &cb],
+        )
+        .await
+        .unwrap();
+
+    // テナントに無い office_id (別のテナントの営業所も) は 400 で、何も書かない
+    for id in [foreign, Uuid::new_v4()] {
+        let got = call_as(
+            &app,
+            "admin",
+            "PUT",
+            t,
+            ca,
+            Some(json!({ "offices": [{ "office_id": id, "role": 1 }] })),
+        )
+        .await;
+        assert_eq!(
+            (got.status, got.json()),
+            (400, json!({ "error": "invalid_office" }))
+        );
+    }
+    let rows: i64 = admin_db
+        .query_one(
+            "SELECT count(*) FROM alc_api.tenko_company_filing_settings WHERE tenant_id = $1 AND company_id = $2",
+            &[&t, &ca],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(rows, 0);
+
+    // 保存: 名称は空でよい (マスタから写す)。旧形式の要素と混ぜられる。本文の partners は読まない
+    let got = call_as(
+        &app,
+        "admin",
+        "PUT",
+        t,
+        ca,
+        Some(json!({
+            "offices": [
+                { "office_id": oa, "role": 1 },
+                { "office_id": ob1, "name": "手で打った名称", "role": 2 },
+                { "office_id": oc, "role": 2 },
+                { "office_id": ob2, "role": 3 },
+                { "office_id": free, "role": 2 },
+                { "office_id": gone, "role": 2 },
+                { "name": "架空 旧形式の車庫", "address": "架空県架空市3-3", "role": 2 },
+            ],
+            "partners": [{ "name": "本文の相手" }],
+        })),
+    )
+    .await;
+    assert_eq!(got.status, 200);
+    let v = got.json();
+    assert_eq!(
+        v["offices"],
+        json!([
+            { "office_id": oa, "name": "架空A 本社営業所", "address": "架空県架空市1-1", "role": 1 },
+            { "office_id": ob1, "name": "架空B 第一営業所", "address": null, "role": 2 },
+            { "office_id": oc, "name": "架空C 営業所", "address": null, "role": 2 },
+            { "office_id": ob2, "name": "架空B 第二営業所", "address": null, "role": 3 },
+            { "office_id": free, "name": "架空 無所属の車庫", "address": null, "role": 2 },
+            { "office_id": gone, "name": "架空 消す営業所", "address": null, "role": 2 },
+            { "name": "架空 旧形式の車庫", "address": "架空県架空市3-3", "role": 2 },
+        ])
+    );
+    // 相手の会社: 自社 (A)・無所属は入らない。事業者ごとに最初に出た順
+    let partners = json!([
+        { "name": "架空B物流株式会社", "address": "架空県架空市2-2", "representative": "架空 次郎", "offices": [
+            { "name": "架空B 第一営業所", "address": null },
+            { "name": "架空B 第二営業所", "address": null },
+            { "name": "架空 消す営業所", "address": null },
+        ] },
+        { "name": "架空C倉庫", "address": null, "representative": null, "offices": [
+            { "name": "架空C 営業所", "address": null },
+        ] },
+    ]);
+    assert_eq!(v["partners"], partners);
+    assert_eq!(call_as(&app, "admin", "GET", t, ca, None).await.json(), v);
+    // 表の partners 列は書かない
+    let stored: serde_json::Value = admin_db
+        .query_one(
+            "SELECT partners FROM alc_api.tenko_company_filing_settings WHERE tenant_id = $1 AND company_id = $2",
+            &[&t, &ca],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(stored, json!([]));
+
+    // マスタを変える: 名称・住所は今の値で返す。消えた営業所は写しのまま (相手の会社からは外れる)。
+    // 事業者を付け替えた営業所は、相手の会社の振り分けも変わる
+    admin_db
+        .execute(
+            "UPDATE alc_api.tenko_offices SET name = '架空A 新本社', address = '架空県架空市9-9' WHERE id = $1",
+            &[&oa],
+        )
+        .await
+        .unwrap();
+    admin_db
+        .execute("DELETE FROM alc_api.tenko_offices WHERE id = $1", &[&gone])
+        .await
+        .unwrap();
+    admin_db
+        .execute(
+            "UPDATE alc_api.tenko_offices SET company_id = $2 WHERE id = $1",
+            &[&ob2, &cc],
+        )
+        .await
+        .unwrap();
+    let v = call_as(&app, "admin", "GET", t, ca, None).await.json();
+    assert_eq!(
+        (v["offices"][0].clone(), v["offices"][5].clone()),
+        (
+            json!({ "office_id": oa, "name": "架空A 新本社", "address": "架空県架空市9-9", "role": 1 }),
+            json!({ "office_id": gone, "name": "架空 消す営業所", "address": null, "role": 2 }),
+        )
+    );
+    assert_eq!(
+        v["partners"],
+        json!([
+            { "name": "架空B物流株式会社", "address": "架空県架空市2-2", "representative": "架空 次郎", "offices": [
+                { "name": "架空B 第一営業所", "address": null },
+            ] },
+            { "name": "架空C倉庫", "address": null, "representative": null, "offices": [
+                { "name": "架空C 営業所", "address": null },
+                { "name": "架空B 第二営業所", "address": null },
+            ] },
+        ])
+    );
+    // 消えた営業所の office_id を含む本文の保存は 400 (マスタに無い)
+    let got = call_as(
+        &app,
+        "admin",
+        "PUT",
+        t,
+        ca,
+        Some(json!({ "offices": [{ "office_id": gone, "role": 2 }] })),
+    )
+    .await;
+    assert_eq!(got.status, 400);
+
+    // 自社の営業所だけなら相手の会社は空
+    let got = call_as(
+        &app,
+        "admin",
+        "PUT",
+        t,
+        ca,
+        Some(json!({ "offices": [{ "office_id": oa, "role": 3 }] })),
+    )
+    .await;
+    assert_eq!(got.json()["partners"], json!([]));
+
+    // 旧形式だけの行は、保存してある partners をそのまま返す
+    admin_db
+        .execute(
+            "INSERT INTO alc_api.tenko_company_filing_settings (tenant_id, company_id, offices, partners) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &t,
+                &cc,
+                &json!([{ "name": "架空B 旧営業所", "address": null, "role": 1 }]),
+                &json!([{ "name": "架空 旧い相手", "address": null, "representative": null, "offices": [] }]),
+            ],
+        )
+        .await
+        .unwrap();
+    let v = call_as(&app, "admin", "GET", t, cc, None).await.json();
+    assert_eq!(
+        (v["offices"].clone(), v["partners"].clone()),
+        (
+            json!([{ "name": "架空B 旧営業所", "address": null, "role": 1 }]),
+            json!([{ "name": "架空 旧い相手", "address": null, "representative": null, "offices": [] }]),
+        )
+    );
+    // 旧形式の行に PUT しても partners 列は書き換えない (応答も保存してある値)
+    let got = call_as(
+        &app,
+        "admin",
+        "PUT",
+        t,
+        cc,
+        Some(json!({ "offices": [{ "name": "架空B 旧営業所", "role": 1 }], "partners": [] })),
+    )
+    .await;
+    assert_eq!(
+        got.json()["partners"],
+        json!([{ "name": "架空 旧い相手", "address": null, "representative": null, "offices": [] }])
+    );
     assert!(app.logs().is_empty());
 }
