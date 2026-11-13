@@ -17,6 +17,7 @@
 //! - [`deliver`] — webhook の送信 (口は [`deliver::Outbox`] に積み、worker が応答の後に `ctx.wait_until` で送る。W7b)
 //! - [`overdue`] — 予定超過の確認 (worker の Cron Trigger が毎分呼ぶ。通知済みの印を先に付けた予定だけ送る。W7c)
 //! - [`filing`] — 点呼の届出・自動点呼機器の認定申請に差し込む値 (事業者ごとに 1 行。admin だけ)
+//! - [`filings`] — 点呼の届出の申請の下書きと到達番号 (admin だけ。営業所は点呼の営業所の写し。Refs ippoan/alc-app#676)
 //! - [`filing_archives`] — e-Gov で出した点呼の届出の申請データ (zip) の保管 (R2。admin だけ。置き場が無ければ 503)
 //! - [`offices`] — 点呼の営業所と、運行管理者・車両の所属 (自動点呼の判定で点呼の方法を決める。権限はテナントのヘッダーだけ)
 //! - [`companies`] — 点呼の事業者と営業所の振り分け (admin だけ。届出の値・申請済みの控えは事業者ごと。Refs ippoan/alc-app#676)
@@ -43,6 +44,7 @@ pub mod driver_info;
 pub mod failures;
 pub mod filing;
 pub mod filing_archives;
+pub mod filings;
 pub mod fire;
 pub mod mail;
 pub mod models;
@@ -122,6 +124,7 @@ pub fn router() -> Router<AppState> {
         .merge(driver_info::router())
         .merge(filing::router())
         .merge(filing_archives::router())
+        .merge(filings::router())
         .merge(offices::router())
         .merge(companies::router())
         .merge(consignments::router())
