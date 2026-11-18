@@ -210,6 +210,26 @@ pub async fn rt_client() -> PgClient {
     client_as(RT_ROLE).await
 }
 
+/// 関数 `function` (引数込みの名前) を呼べるだけで、表を 1 つも読めないロールの接続 (横断の引きは通り、テナントの読みが
+/// 失敗する経路を通すため)。ロールは無ければ作る (何度呼んでもよい)
+pub async fn function_only_client(role: &str, function: &str) -> PgClient {
+    prepare().await;
+    admin()
+        .await
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN
+                 CREATE ROLE {role} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{PASSWORD}';
+               END IF;
+             END $$;
+             GRANT USAGE ON SCHEMA alc_api TO {role};
+             GRANT EXECUTE ON FUNCTION alc_api.{function} TO {role};"
+        ))
+        .await
+        .unwrap();
+    client_as(role).await
+}
+
 /// 接続の backend の pid (あとで落とすため)
 pub async fn backend_pid(pg: &mut PgClient) -> i32 {
     pg.tenant_tx(Uuid::nil(), |tx| {

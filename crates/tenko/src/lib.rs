@@ -23,7 +23,8 @@
 //! - [`companies`] — 点呼の事業者と営業所の振り分け (admin だけ。届出の値・申請済みの控えは事業者ごと。Refs ippoan/alc-app#676)
 //! - [`consignments`] — 事業者間遠隔点呼の受委託 (委託の営業所 → 受託の営業所・許可・期間。admin だけ)
 //! - [`fire`] — ほかの worker (測定の口) から点呼の節目の webhook を預かる口 (`/internal/webhooks/fire`。`/api` の外)
-//! - [`mail`] — 点呼の異常 (中断・日常点検の NG・遅延) を notify のグループ「点呼の異常」へメールで知らせる (Refs ippoan/alc-app#676)
+//! - [`mail`] — 点呼の異常 (中断・日常点検の NG・遅延・IT点呼 の着信) を notify のグループ「点呼の異常」へメールで知らせる (Refs ippoan/alc-app#676)
+//! - [`it_pending`] — IT点呼 の判定待ちの毎朝のまとめ (worker の Cron Trigger が 06:00 日本時間に呼ぶ。Refs ippoan/alc-app-s3#352)
 //!
 //! **点呼の電話のアプリの口 (`/tenko-call/register`・`/tenko-call/tenko`) だけがテナントのヘッダーを要らない** (rust でも公開の口。
 //! テナントは点呼用の番号・電話番号から引く)。ほかは `X-Tenant-ID` を要る (auth-worker が付ける。無い・UUID でない → 401。
@@ -46,6 +47,7 @@ pub mod filing;
 pub mod filing_archives;
 pub mod filings;
 pub mod fire;
+pub mod it_pending;
 pub mod mail;
 pub mod models;
 pub mod offices;

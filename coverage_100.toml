@@ -96,3 +96,8 @@ path = "crates/tenko/src/offices.rs"
 # worker の送り手 src/mail.rs は wasm 専用で対象外。Refs ippoan/alc-app#676)
 [[files]]
 path = "crates/tenko/src/mail.rs"
+
+# IT点呼 の判定待ちの毎朝のまとめ (横断の引き・テナントの読み・件名と本文。tests/it_pending_db.rs が偽物の送り手で通す。
+# Refs ippoan/alc-app-s3#352)
+[[files]]
+path = "crates/tenko/src/it_pending.rs"
