@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 const URI: &str = "/internal/webhooks/fire";
 
-/// 4 つの種類を積む。payload は渡されたまま (送るのは応答の後の deliver)
+/// 5 つの種類を積む。payload は渡されたまま (送るのは応答の後の deliver とメール)
 #[tokio::test]
 async fn fire_queues_known_events() {
     let app = support::app().await;
@@ -28,7 +28,7 @@ async fn fire_queues_known_events() {
         assert!(got.body.is_empty());
     }
     let queued = app.outbox.take();
-    assert_eq!(queued.len(), 4);
+    assert_eq!(queued.len(), 5);
     for ((tenant_id, event), expected) in queued.iter().zip(tenko::fire::EVENT_TYPES) {
         assert_eq!(*tenant_id, t);
         assert_eq!(event.event_type, expected);

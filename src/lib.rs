@@ -24,12 +24,12 @@ use futures_util::future::join;
 use futures_util::lock::Mutex;
 use tenko::deliver::{deliver_all, Outbox, Sender};
 use tenko::mail::{notify_all, SharedMailer};
-use tenko::overdue;
+use tenko::{it_pending, overdue};
 use tenko::{router, AppState, LogSink};
 use tower_service::Service;
 use worker::{
-    console_error, event, Context, Env, HttpRequest, Result, ScheduleContext, ScheduledEvent,
-    WorkerVersionMetadata,
+    console_error, console_log, event, Context, Env, HttpRequest, Result, ScheduleContext,
+    ScheduledEvent, WorkerVersionMetadata,
 };
 
 /// 点呼の異常のメールの `send_email` の binding (wrangler.toml の `[[send_email]]`。トップと staging の両方に在る) と、
@@ -133,11 +133,13 @@ async fn fetch(req: HttpRequest, env: Env, ctx: Context) -> Result<Response<Body
     Ok(resp)
 }
 
-/// 予定超過の確認 (wrangler.toml の `[triggers]` = 毎分、本番だけ)。中身は crates/tenko の `overdue::run`
-/// (webhook と、notify のグループ「点呼の異常」へのメール)。
+/// 定時実行 (wrangler.toml の `[triggers]`、本番だけ)。cron の式で分ける:
+/// - `it_pending::CRON` (毎朝 06:00 日本時間) — IT点呼 の判定待ちのまとめを notify のグループ「点呼の異常」へ (crates/tenko の `it_pending::run`)
+/// - それ以外 (毎分) — 予定超過の確認 (crates/tenko の `overdue::run`。webhook と、同じグループへのメール)
+///
 /// 送り終えるまで待つ (rust は Cloud Run の中の 60 秒のループだった)
 #[event(scheduled)]
-async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     let pg = match db::connect(&env).await {
         Ok(c) => c,
         Err(e) => {
@@ -145,6 +147,12 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
             return;
         }
     };
+    if event.cron() == it_pending::CRON {
+        let (sent, failed) =
+            it_pending::run(Arc::new(Mutex::new(pg)), anomaly_mailer(&env), log_sink()).await;
+        console_log!("tenko: it pending mail sent {sent} failed {failed}");
+        return;
+    }
     let sender = Sender {
         http: Arc::new(webhook::WorkerHttp),
         sleeper: Arc::new(webhook::WorkerSleeper),

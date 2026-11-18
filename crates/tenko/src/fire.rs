@@ -10,12 +10,14 @@
 //! **`/api` の下に置かない。** auth-worker は `/api/...` の path だけを Service Binding に渡すので、この口には外から届かない
 //! (この worker の入口は Service Binding だけ)。auth-worker の振り分けの表にも載せない。
 //!
-//! 受ける種類は [`EVENT_TYPES`] の 4 つだけ。payload の `tenant_id` はヘッダーのテナントと同じでなければ 400
+//! 受ける種類は [`EVENT_TYPES`] の 5 つだけ。payload の `tenant_id` はヘッダーのテナントと同じでなければ 400
 //! (別のテナントの送り先へ本文を渡さない)。**dev端末の要求 (`X-Device-Dev: 1`) は 202 で受けて積まない** (段の口と同じ)。
 //!
 //! 積んだ控えのうち中断 (`tenko_interrupted`)・日常点検の NG (`inspection_ng`) は、webhook に加えて notify のグループ
 //! 「点呼の異常」へメールでも知らせる (worker が応答の後に [`crate::mail::notify_all`] で送る。Refs ippoan/alc-app#676)。
 //! tenant の一致と dev端末の除外を通ったものだけが積まれるので、dev端末の要求からはメールも送らない。
+//! IT点呼 の着信 (`it_tenko_pending`。測定の口が判定待ちの IT点呼 を新しく作ったとき。Refs ippoan/alc-app-s3#352) は
+//! メールだけで知らせる (webhook の設定の種類に無い)。
 
 use alc_core_wasm::{DeviceDevSlot, TenantId};
 use axum::extract::State;
@@ -28,12 +30,14 @@ use serde_json::Value;
 use crate::deliver::Event;
 use crate::AppState;
 
-/// 預かる webhook の種類 (段の口が送るもの。予定超過 `tenko_overdue` はこの worker の定時実行が送るので入れない)
-pub const EVENT_TYPES: [&str; 4] = [
+/// 預かる種類 (段の口が送るもの。予定超過 `tenko_overdue` はこの worker の定時実行が送るので入れない)。
+/// `it_tenko_pending` (IT点呼 の着信) はメールだけ ([`crate::mail::MAIL_ONLY`]。webhook は送らない)
+pub const EVENT_TYPES: [&str; 5] = [
     "alcohol_detected",
     "report_submitted",
     "tenko_interrupted",
     "inspection_ng",
+    crate::mail::IT_TENKO_PENDING,
 ];
 
 /// `POST /internal/webhooks/fire` の本文

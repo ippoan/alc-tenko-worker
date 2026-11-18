@@ -32,10 +32,12 @@ region = "aws:ap-northeast-1"
 [observability]
 enabled = true
 
-# 予定超過の確認 (src/lib.rs の scheduled → crates/tenko の overdue、W7c)。毎分、本番だけ。
+# 定時実行 (src/lib.rs の scheduled が cron の式で分ける)。本番だけ。
+# - "* * * * *" 予定超過の確認 (crates/tenko の overdue、W7c)。毎分
+# - "0 21 * * *" IT点呼 の判定待ちのまとめ (crates/tenko の it_pending)。毎日 21:00 UTC = 06:00 日本時間
 # triggers は env に継承されるので、env.staging / env.local では crons = [] で止める (scripts/check-exposure.sh が検査する)
 [triggers]
-crons = ["* * * * *"]
+crons = ["* * * * *", "0 21 * * *"]
 
 # 本番の DB: Cloudflare Hyperdrive の binding TENKO_HYPERDRIVE (src/db.rs)。設定は実行用ロールのもの 1 つを
 # 複数の worker で共有する (worker ごとに作らない。id は ippoan/alc-trouble-worker と同じ)。

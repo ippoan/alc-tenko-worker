@@ -4,11 +4,15 @@
 //! アルコール検知メール (`crates/measurements/src/alert.rs`)。宛先は notify の既存の表 (`notify_groups`・
 //! `notify_recipient_groups`・`notify_recipients`) から引き、専用の表は作らない。
 //!
-//! 送る種類は 3 つ ([`compose`] が件名・本文を組めるもの。ほかの種類は送らない):
+//! 送る種類は 4 つ ([`compose`] が件名・本文を組めるもの。ほかの種類は送らない):
 //! - `tenko_interrupted` (中断)・`inspection_ng` (日常点検の NG) — 測定の口が [`crate::fire`] に渡し、口が
 //!   tenant の一致と dev端末の除外を通して [`crate::deliver::Outbox`] に積んだ控え。worker が応答の後に
 //!   [`notify_all`] で送る (webhook の送信と同じ控え。dev端末の要求・テナントの違う payload は積まれないので送らない)
 //! - `tenko_overdue` (遅延) — [`crate::overdue::run`] が通知済みの印を先に付けた予定だけ (同じ予定に 2 回送らない)
+//! - `it_tenko_pending` (IT点呼 の着信 = 運行管理者の判定待ち。Refs ippoan/alc-app-s3#352) — 測定の口が判定待ちの IT点呼 を
+//!   新しく作ったときに [`crate::fire`] へ渡す (1 件 1 回)。**メールだけ** ([`MAIL_ONLY`]。webhook の種類には無い)
+//!
+//! 毎朝の判定待ちのまとめ ([`crate::it_pending`]) も、同じグループへ [`send_to_group`] で送る。
 //!
 //! 送るのは [`Mailer`] (worker では Cloudflare の `send_email` の binding、テストでは偽物)。無ければ (`None`) 送らない。
 //! 失敗はログ 1 行だけで、リトライしない。**ログは固定の語だけ** (メールアドレス・tenant_id・氏名を出さない)。
@@ -35,6 +39,13 @@ pub const SUBJECT_PREFIX: &str = "【点呼の異常】";
 
 /// 値が引けないときの表示
 pub const UNKNOWN: &str = "不明";
+
+/// IT点呼 の着信 (判定待ちの IT点呼 ができた) の種類
+pub const IT_TENKO_PENDING: &str = "it_tenko_pending";
+
+/// メールだけで知らせる種類 (webhook の設定の種類 (`webhook_configs.event_type` の CHECK) に無いので、webhook の送信
+/// ([`crate::deliver::deliver_all`]) は飛ばす)
+pub const MAIL_ONLY: [&str; 1] = [IT_TENKO_PENDING];
 
 /// 送信の段の失敗。持つのは段の名前だけ (宛先・本文・ランタイムのエラー文を持たない)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,22 +127,40 @@ fn text<'a>(data: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// 時刻を日本時間の `YYYY-MM-DD HH:MM` に
+pub fn jst_time<Tz: chrono::TimeZone>(t: &DateTime<Tz>) -> String {
+    let jst = FixedOffset::east_opt(9 * 3600).expect("+09:00");
+    t.with_timezone(&jst).format("%Y-%m-%d %H:%M").to_string()
+}
+
 /// RFC 3339 の時刻を日本時間の `YYYY-MM-DD HH:MM` に (読めなければ [`UNKNOWN`])
 fn jst(at: Option<&str>) -> String {
-    let jst = FixedOffset::east_opt(9 * 3600).expect("+09:00");
     at.and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&jst).format("%Y-%m-%d %H:%M").to_string())
+        .map(|t| jst_time(&t))
         .unwrap_or_else(|| UNKNOWN.to_owned())
 }
 
-/// 点呼の種類の表示
-fn tenko_type(data: &Value) -> String {
-    match text(data, "tenko_type") {
+/// 1 行にした文字列 (無い・空なら [`UNKNOWN`])
+pub fn or_unknown(value: Option<&str>) -> String {
+    value
+        .filter(|s| !s.trim().is_empty())
+        .map_or_else(|| UNKNOWN.to_owned(), one_line)
+}
+
+/// 点呼の種類の表示 (値そのもの。無い・空なら [`UNKNOWN`])
+pub fn tenko_type_label(value: Option<&str>) -> String {
+    match value.filter(|s| !s.trim().is_empty()) {
         Some("pre_operation") => "乗務前".to_owned(),
         Some("post_operation") => "乗務後".to_owned(),
+        Some("normal") => "通常".to_owned(),
         Some(other) => one_line(other),
         None => UNKNOWN.to_owned(),
     }
+}
+
+/// 点呼の種類の表示 (`data` の `tenko_type`)
+fn tenko_type(data: &Value) -> String {
+    tenko_type_label(text(data, "tenko_type"))
 }
 
 /// 安全の判定で外れた項目の表示 (測定の口の `failed_items` の語)
@@ -160,7 +189,7 @@ pub const INSPECTION_ITEMS: [(&str, &str); 8] = [
 ];
 
 /// 本文の末尾
-const FOOTER: &str = "\nこのメールは自動点呼の記録から送っています。\n";
+pub const FOOTER: &str = "\nこのメールは自動点呼の記録から送っています。\n";
 
 /// 種類ごとの件名と本文 (日本語。時刻は日本時間)。メールを送らない種類は None。
 /// payload は webhook と同じもの (`timestamp` と `data`)
@@ -232,6 +261,17 @@ pub fn compose(event: &Event) -> Option<(String, String)> {
             lines.push(format!("点呼の状態: {state}"));
             "点呼が予定の時刻を過ぎても完了していません"
         }
+        IT_TENKO_PENDING => {
+            lines.push(format!("乗務員: {name}"));
+            lines.push(format!("点呼の種類: {}", tenko_type(data)));
+            lines.push(format!(
+                "開始: {} (日本時間)",
+                jst(text(data, "started_at").or_else(|| text(p, "timestamp")))
+            ));
+            lines.push(format!("拠点: {}", or_unknown(text(data, "location"))));
+            lines.push("IT点呼 の画面で応答し、判定を保存してください。".to_owned());
+            "IT点呼 の着信がありました (運行管理者の判定待ち)"
+        }
         _ => return None,
     };
     if let Some(manager) = text(data, "responsible_manager_name") {
@@ -252,6 +292,19 @@ pub async fn notify(
     events: &[Event],
 ) -> (usize, usize) {
     let mails: Vec<(String, String)> = events.iter().filter_map(compose).collect();
+    send_to_group(pg, mailer, log, tenant_id, &mails).await
+}
+
+/// 組んだ (件名, 本文) を、テナントのグループ「点呼の異常」の宛先へ 1 人 1 通ずつ送る。無ければ DB に触らない。
+/// 宛先は 1 回だけ引く (pg の lock は引く間だけ持つ)。送らない理由・失敗はログ 1 行 (固定の語。グループが無いときだけ
+/// 別の語 = 設定漏れの見分け)。返すのは (送れた数, 失敗した数)
+pub async fn send_to_group(
+    pg: &Arc<Mutex<PgClient>>,
+    mailer: Option<&SharedMailer>,
+    log: &LogSink,
+    tenant_id: Uuid,
+    mails: &[(String, String)],
+) -> (usize, usize) {
     if mails.is_empty() {
         return (0, 0);
     }
@@ -279,7 +332,7 @@ pub async fn notify(
         }
     };
     let (mut sent, mut failed) = (0, 0);
-    for (subject, body) in &mails {
+    for (subject, body) in mails {
         for addr in &to {
             let mail = Mail {
                 to: addr.clone(),
@@ -456,6 +509,46 @@ mod tests {
         let (_, body) = compose(&e).unwrap();
         assert!(body.contains("点呼の状態: 開始したが完了していない\n"));
         assert!(!body.contains("超過"));
+    }
+
+    #[test]
+    fn it_tenko_pending_has_driver_start_and_location() {
+        let e = Event::new(
+            "it_tenko_pending",
+            json!({
+                "timestamp": "2026-11-17T23:05:00Z",
+                "data": {
+                    "employee_name": "着信 四郎",
+                    "tenko_type": "normal",
+                    "started_at": "2026-11-17T23:00:00Z",
+                    "location": "第一\n営業所",
+                }
+            }),
+        );
+        let (subject, body) = compose(&e).unwrap();
+        assert_eq!(
+            subject,
+            "【点呼の異常】IT点呼 の着信がありました (運行管理者の判定待ち)"
+        );
+        assert_eq!(
+            body,
+            "IT点呼 の着信がありました (運行管理者の判定待ち)。\n\n\
+             乗務員: 着信 四郎\n\
+             点呼の種類: 通常\n\
+             開始: 2026-11-18 08:00 (日本時間)\n\
+             拠点: 第一 営業所\n\
+             IT点呼 の画面で応答し、判定を保存してください。\n\n\
+             このメールは自動点呼の記録から送っています。\n"
+        );
+        // 開始の時刻が無ければ payload の時刻。拠点が無ければ不明
+        let e = Event::new(
+            "it_tenko_pending",
+            json!({ "timestamp": "2026-11-17T23:05:00Z", "data": { "location": " " } }),
+        );
+        let (_, body) = compose(&e).unwrap();
+        assert!(body.contains("開始: 2026-11-18 08:05 (日本時間)\n"));
+        assert!(body.contains("拠点: 不明\n"));
+        assert!(body.contains("点呼の種類: 不明\n"));
     }
 
     #[test]

@@ -53,6 +53,12 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   遅延 (`overdue::run` が CLAIM で印を付けた予定だけ) を、notify のグループ「点呼の異常」の宛先へ 1 人 1 通。送り手は `send_email` の
   binding `ANOMALY_EMAIL` (destination_address 無し) と変数 `NOTIFY_EMAIL_FROM` (`src/mail.rs`)。遅延のテナントは
   `list_tenko_overdue_tenants()` (migration 212。webhook の設定の有無を見ない) で引く。ログは固定の語だけ。
+- **IT点呼 の判定待ちのメール** (Refs ippoan/alc-app-s3#352。宛先は同じグループ「点呼の異常」):
+  - 毎朝のまとめ (`it_pending.rs`): `[triggers]` の `"0 21 * * *"` (= 06:00 日本時間。`scheduled` が `it_pending::CRON` で分ける)。判定待ち =
+    点呼方法 `IT点呼` で判定が空 (status は問わない。管理画面の判定待ちの一覧と同じ)・dev の行を除く。テナントは
+    `list_it_tenko_pending_tenants()` (migration 217) で引き、0 件のテナントには送らない。送った印は付けない (1 日 1 回の cron に任せる)。
+  - 着信 (`mail.rs` の `it_tenko_pending`): 測定の口が判定待ちの IT点呼 を新しく作ったときに `fire` へ渡す。**メールだけ**
+    (`mail::MAIL_ONLY`。webhook の設定の種類に無いので `deliver_all` は飛ばす)。
 - **点呼の事業者・受委託** (`companies.rs`・`consignments.rs`、`/api/tenko/companies`・`/api/tenko/consignments`、admin だけ。alc-migrations 214。Refs ippoan/alc-app#676):
   事業者は営業所 (`tenko_offices.company_id`) の振り分けと `is_self` (1 テナント 1 行。付け替えは同じ transaction) を持つ。受委託は
   委託 → 受託の営業所の組で、2 つの事業者が付いていて別であること・到達番号の形・期間 (両方か両方空、5 年未満) を worker が検める。
@@ -66,7 +72,7 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   置き場の trait (`FileStore`) は crate、R2 の実装は `src/r2.rs` (wasm 専用)。R2 の future は Send でないので `tenant_tx` の中で await しない。
 - **点呼の届出の申請の下書き** (`filings.rs`、`/api/tenko/filings*`、admin だけ、migration 215): 営業所は `tenko_offices` の写し、
   PATCH (到達番号を付ける) は同じ transaction で `tenko_filing_archive_companies` に追記 (ON CONFLICT DO NOTHING)、下書き (到達番号なし) だけ消せる。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 18・admin_db 3・call_db 2・companies_db 3・consignments_db 2・deliver_db 2・failures_db 1・filing_db 4・filings_db 2・filing_archives_db 6・fire_db 2・mail_db 3・offices_db 7・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 22・admin_db 3・call_db 2・companies_db 3・consignments_db 2・deliver_db 2・failures_db 1・filing_db 4・filings_db 2・filing_archives_db 6・fire_db 2・it_pending_db 3・mail_db 3・offices_db 7・overdue_db 4・records_db 3・schedules_db 4・views_db 3)
   はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-devices-worker と同じ rev)。

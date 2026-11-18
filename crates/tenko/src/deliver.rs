@@ -247,7 +247,7 @@ pub async fn deliver(
     }
 }
 
-/// 積んだものを順に送る (worker は `ctx.wait_until` の中で呼ぶ)
+/// 積んだものを順に送る (worker は `ctx.wait_until` の中で呼ぶ)。メールだけの種類 ([`crate::mail::MAIL_ONLY`]) は飛ばす
 pub async fn deliver_all(
     pg: Arc<futures_util::lock::Mutex<PgClient>>,
     sender: Sender,
@@ -255,6 +255,10 @@ pub async fn deliver_all(
     events: Vec<(Uuid, Event)>,
 ) {
     for (tenant_id, event) in events {
+        // メールだけの種類 (IT点呼 の着信) は webhook の設定を持てないので引きに行かない
+        if crate::mail::MAIL_ONLY.contains(&event.event_type) {
+            continue;
+        }
         deliver(&pg, &sender, &log, tenant_id, event).await;
     }
 }
