@@ -76,7 +76,8 @@ pub mod sql {
     );
 
     /// CSV (全件)。判定・理由・確認の方法・判定した人の名前・代替措置は、記録に紐づく判定の表 (alc-migrations 220。
-    /// 追記だけ) の最新の行から引く。その表に行が無い記録 (220 より前の判定・判定なし) はセッションと社員から引く
+    /// 追記だけ) の最新の行から引く。その表に行が無い記録 (220 より前の判定・判定なし) はセッションと社員から引く。
+    /// 末尾に最初の行の判定・理由・判定した人・時刻と、最新の行の時刻を足す (要件 22「最初と最新が残る」。Refs ippoan/alc-app#722)
     pub const CSV: &str = concatcp!(
         "SELECT ",
         RECORD_COLUMNS,
@@ -84,13 +85,17 @@ pub mod sql {
          CASE WHEN j.id IS NULL THEN s.manager_judgment_reason ELSE j.reason END, \
          CASE WHEN j.id IS NULL THEN s.manager_judgment_method ELSE j.method END, \
          CASE WHEN j.id IS NULL THEN e.name ELSE j.judged_by_name END, \
-         j.alternative_measure \
+         j.alternative_measure, \
+         f.judgment, f.reason, f.judged_by_name, f.created_at, j.created_at \
          FROM alc_api.tenko_records r \
          LEFT JOIN alc_api.tenko_sessions s ON s.id = r.session_id AND s.tenant_id = r.tenant_id \
          LEFT JOIN alc_api.employees e ON e.id = s.manager_judgment_by AND e.tenant_id = r.tenant_id \
-         LEFT JOIN LATERAL (SELECT jj.id, jj.judgment, jj.reason, jj.method, jj.judged_by_name, jj.alternative_measure \
+         LEFT JOIN LATERAL (SELECT jj.id, jj.judgment, jj.reason, jj.method, jj.judged_by_name, jj.alternative_measure, jj.created_at \
              FROM alc_api.tenko_record_judgments jj WHERE jj.tenant_id = r.tenant_id AND jj.record_id = r.id \
              ORDER BY jj.created_at DESC, jj.id DESC LIMIT 1) j ON true \
+         LEFT JOIN LATERAL (SELECT jf.judgment, jf.reason, jf.judged_by_name, jf.created_at \
+             FROM alc_api.tenko_record_judgments jf WHERE jf.tenant_id = r.tenant_id AND jf.record_id = r.id \
+             ORDER BY jf.created_at, jf.id LIMIT 1) f ON true \
          WHERE ",
         WHERE,
         " ORDER BY r.recorded_at DESC"
@@ -241,7 +246,7 @@ fn time(v: Option<DateTime<Utc>>) -> String {
 
 /// CSV の見出し (rust の 39 列 + 自己点検表の 8 列。record_data から読む 9 列のあとに、安全の判定の基準値との差 3 列
 /// (業務前 二十三 ヌ。`safety_judgment.medical_diffs`))
-pub const CSV_HEADER: [&str; 47] = [
+pub const CSV_HEADER: [&str; 52] = [
     "record_id",
     "employee_name",
     "tenko_type",
@@ -289,6 +294,11 @@ pub const CSV_HEADER: [&str; 47] = [
     "temperature_diff",
     "systolic_diff",
     "diastolic_diff",
+    "first_manager_judgment",
+    "first_manager_judgment_reason",
+    "first_manager_judgment_by_name",
+    "first_manager_judged_at",
+    "manager_judged_at",
 ];
 
 /// 記録 1 件の CSV の行
@@ -346,6 +356,11 @@ pub fn csv_row(r: &TenkoRecord) -> Vec<String> {
         diff(r.safety_judgment.as_ref(), "temperature_diff"),
         diff(r.safety_judgment.as_ref(), "systolic_diff"),
         diff(r.safety_judgment.as_ref(), "diastolic_diff"),
+        r.first_judgment.clone().unwrap_or_default(),
+        r.first_judgment_reason.clone().unwrap_or_default(),
+        r.first_judgment_by_name.clone().unwrap_or_default(),
+        time(r.first_judged_at),
+        time(r.latest_judged_at),
     ]
 }
 
