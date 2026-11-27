@@ -115,6 +115,9 @@ pub struct TenkoRecord {
     pub manager_judgment_by_name: Option<String>,
     #[serde(skip)]
     pub manager_judgment_method: Option<String>,
+    /// 記録に紐づく判定の表 (alc-migrations 220) の最新の行の代替措置。CSV だけが引き、JSON には出さない
+    #[serde(skip)]
+    pub judgment_alternative_measure: Option<String>,
 }
 
 /// 記録の列 (別名 `r` の表から)。[`record`] がこの順に読む
@@ -126,7 +129,7 @@ pub const RECORD_COLUMNS: &str = "r.id, r.tenant_id, r.session_id, r.employee_id
      r.recorded_at, r.record_hash, r.self_declaration, r.safety_judgment, r.daily_inspection, r.interrupted_at, \
      r.resumed_at, r.resume_reason";
 
-/// [`RECORD_COLUMNS`] の後ろに判定の 4 欄 (judgment, reason, method, by_name) を足した行なら `with_judgment`
+/// [`RECORD_COLUMNS`] の後ろに判定の 5 欄 (judgment, reason, method, by_name, alternative_measure) を足した行なら `with_judgment`
 pub fn record(r: &Row, with_judgment: bool) -> TenkoRecord {
     let judgment = |i: usize| -> Option<String> {
         if with_judgment {
@@ -175,6 +178,7 @@ pub fn record(r: &Row, with_judgment: bool) -> TenkoRecord {
         manager_judgment_reason: judgment(36),
         manager_judgment_method: judgment(37),
         manager_judgment_by_name: judgment(38),
+        judgment_alternative_measure: judgment(39),
     }
 }
 

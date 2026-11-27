@@ -1,8 +1,9 @@
 //! 点呼の記録 (rust の `alc_tenko::tenko_records`・repo/tenko_records.rs の写し)。
 //!
 //! - `GET /tenko/records` (`?employee_id=&tenko_type=&status=&date_from=&date_to=&page=&per_page=`) — 一覧 (記録の新しい順)
-//! - `GET /tenko/records/csv` — 同じ絞り込みの全件の CSV (BOM 付き)。判定 (運行管理者の OK/NG・理由・判定した人の名前) は
-//!   記録が不変なので点呼のセッションから都度引き、対面で確定した IT点呼 は点呼方法を「対面点呼」に読み替える
+//! - `GET /tenko/records/csv` — 同じ絞り込みの全件の CSV (BOM 付き)。判定 (運行管理者の OK/NG・理由・判定した人の名前・
+//!   代替措置) は記録に紐づく判定の表 (alc-migrations 220。追記だけ) の最新の行から、無ければ点呼のセッションから引き、
+//!   対面で確定した IT点呼 は点呼方法を「対面点呼」に読み替える
 //!
 //! rust との違い: 絞り込みは文を組み立てず `($n IS NULL OR ...)` の 1 文にした。1 件の取得 (`/tenko/records/{id}`) は
 //! 呼び手が無く rust-alc-api#781 で消したので持たない。
@@ -74,14 +75,22 @@ pub mod sql {
         " ORDER BY r.recorded_at DESC LIMIT $7 OFFSET $8"
     );
 
-    /// CSV (全件)。判定はセッションから、判定した人の名前は社員から引く
+    /// CSV (全件)。判定・理由・確認の方法・判定した人の名前・代替措置は、記録に紐づく判定の表 (alc-migrations 220。
+    /// 追記だけ) の最新の行から引く。その表に行が無い記録 (220 より前の判定・判定なし) はセッションと社員から引く
     pub const CSV: &str = concatcp!(
         "SELECT ",
         RECORD_COLUMNS,
-        ", s.manager_judgment, s.manager_judgment_reason, s.manager_judgment_method, e.name \
+        ", CASE WHEN j.id IS NULL THEN s.manager_judgment ELSE j.judgment END, \
+         CASE WHEN j.id IS NULL THEN s.manager_judgment_reason ELSE j.reason END, \
+         CASE WHEN j.id IS NULL THEN s.manager_judgment_method ELSE j.method END, \
+         CASE WHEN j.id IS NULL THEN e.name ELSE j.judged_by_name END, \
+         j.alternative_measure \
          FROM alc_api.tenko_records r \
          LEFT JOIN alc_api.tenko_sessions s ON s.id = r.session_id AND s.tenant_id = r.tenant_id \
          LEFT JOIN alc_api.employees e ON e.id = s.manager_judgment_by AND e.tenant_id = r.tenant_id \
+         LEFT JOIN LATERAL (SELECT jj.id, jj.judgment, jj.reason, jj.method, jj.judged_by_name, jj.alternative_measure \
+             FROM alc_api.tenko_record_judgments jj WHERE jj.tenant_id = r.tenant_id AND jj.record_id = r.id \
+             ORDER BY jj.created_at DESC, jj.id DESC LIMIT 1) j ON true \
          WHERE ",
         WHERE,
         " ORDER BY r.recorded_at DESC"
@@ -330,7 +339,10 @@ pub fn csv_row(r: &TenkoRecord) -> Vec<String> {
         record_data_str(&r.record_data, "vehicle_number_source"),
         record_data_str(&r.record_data, "resumed_by_name"),
         record_data_str(&r.record_data, "cancel_reason"),
-        record_data_str(&r.record_data, "alternative_measure"),
+        // 代替措置は判定の表の最新の行にあればそれ、無ければ記録時の値 (取り消しの本文に付いたもの)
+        r.judgment_alternative_measure
+            .clone()
+            .unwrap_or_else(|| record_data_str(&r.record_data, "alternative_measure")),
         diff(r.safety_judgment.as_ref(), "temperature_diff"),
         diff(r.safety_judgment.as_ref(), "systolic_diff"),
         diff(r.safety_judgment.as_ref(), "diastolic_diff"),
