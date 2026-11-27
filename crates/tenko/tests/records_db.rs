@@ -238,10 +238,26 @@ async fn csv_reads_judgment_and_rewrites_method() {
     assert_eq!(&got.body[..3], &[0xEF, 0xBB, 0xBF]);
     let text = String::from_utf8(got.body[3..].to_vec()).unwrap();
     let mut rdr = csv::Reader::from_reader(text.as_bytes());
-    assert_eq!(rdr.headers().unwrap().len(), 47);
+    assert_eq!(rdr.headers().unwrap().len(), 52);
     assert_eq!(
-        rdr.headers().unwrap().iter().skip(44).collect::<Vec<_>>(),
+        rdr.headers()
+            .unwrap()
+            .iter()
+            .skip(44)
+            .take(3)
+            .collect::<Vec<_>>(),
         ["temperature_diff", "systolic_diff", "diastolic_diff"]
+    );
+    // 要件 22「最初と最新が残る」(Refs ippoan/alc-app#722): 最初の判定と、最初・最新の判定の時刻
+    assert_eq!(
+        rdr.headers().unwrap().iter().skip(47).collect::<Vec<_>>(),
+        [
+            "first_manager_judgment",
+            "first_manager_judgment_reason",
+            "first_manager_judgment_by_name",
+            "first_manager_judged_at",
+            "manager_judged_at"
+        ]
     );
     let h = rdr.headers().unwrap().clone();
     assert_eq!(
@@ -261,6 +277,25 @@ async fn csv_reads_judgment_and_rewrites_method() {
         (&rows[2][26], &rows[2][27], &rows[2][28], &rows[2][43]),
         ("ng", "酒気帯び", "判定時 花子", "交代要員を手配")
     );
+    // 最初の判定 (ok・理由なし) と、最初・最新の時刻
+    assert_eq!(
+        (
+            &rows[2][47],
+            &rows[2][48],
+            &rows[2][49],
+            &rows[2][50],
+            &rows[2][51]
+        ),
+        (
+            "ok",
+            "",
+            "判定時 花子",
+            "2026-10-04T10:00:00+00:00",
+            "2026-10-04T11:00:00+00:00"
+        )
+    );
+    // 判定の表に行が無い記録は空欄 (220 より前の判定・判定なし)
+    assert_eq!((&rows[1][47], &rows[1][50], &rows[1][51]), ("", "", ""));
     // 新しい順。自動点呼は判定なし
     assert_eq!(&rows[0][3], "自動点呼");
     assert_eq!(&rows[0][26], "");
