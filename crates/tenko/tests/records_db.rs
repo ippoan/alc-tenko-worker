@@ -3,7 +3,7 @@
 mod support;
 
 use serde_json::json;
-use support::{app, call, call_dev, call_with, employee, record, session, tenant};
+use support::{admin, app, call, call_dev, call_with, employee, record, session, tenant};
 
 #[tokio::test]
 async fn tenant_header_is_required() {
@@ -180,6 +180,53 @@ async fn csv_reads_judgment_and_rewrites_method() {
     .await;
     let s2 = session(t, e, "自動点呼", "completed", false, None).await;
     record(t, s2, e, "2026-10-06T09:00:00Z", false, &[]).await;
+    // 自動で中止した記録に後から入れた判定 (記録に紐づく判定の表。最新の行が出る)
+    let s3 = session(
+        t,
+        e,
+        "自動点呼",
+        "cancelled",
+        false,
+        Some(("ok", "古い列", "it", manager)),
+    )
+    .await;
+    let r3 = record(
+        t,
+        s3,
+        e,
+        "2026-10-04T09:00:00Z",
+        false,
+        &[
+            ("status", "'cancelled'"),
+            (
+                "record_data",
+                r#"'{"alternative_measure": "記録時の措置"}'"#,
+            ),
+        ],
+    )
+    .await;
+    for (j, reason, alt, at) in [
+        ("ok", "NULL", "NULL", "2026-10-04T10:00:00Z"),
+        (
+            "ng",
+            "'酒気帯び'",
+            "'交代要員を手配'",
+            "2026-10-04T11:00:00Z",
+        ),
+    ] {
+        admin()
+            .await
+            .execute(
+                &format!(
+                    "INSERT INTO alc_api.tenko_record_judgments (tenant_id, record_id, judgment, reason, \
+                     alternative_measure, judged_by, judged_by_name, created_at) \
+                     VALUES ($1, $2, '{j}', {reason}, {alt}, $3, '判定時 花子', '{at}')"
+                ),
+                &[&t, &r3, &manager],
+            )
+            .await
+            .unwrap();
+    }
 
     let got = call(&app, "GET", "/api/tenko/records/csv", Some(t), None).await;
     assert_eq!(got.status, 200);
@@ -208,7 +255,12 @@ async fn csv_reads_judgment_and_rewrites_method() {
         ]
     );
     let rows: Vec<csv::StringRecord> = rdr.records().map(|r| r.unwrap()).collect();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
+    // 判定の表に行がある記録: 最新の行の判定・理由・氏名・代替措置 (セッションの列・記録時の値より優先)
+    assert_eq!(
+        (&rows[2][26], &rows[2][27], &rows[2][28], &rows[2][43]),
+        ("ng", "酒気帯び", "判定時 花子", "交代要員を手配")
+    );
     // 新しい順。自動点呼は判定なし
     assert_eq!(&rows[0][3], "自動点呼");
     assert_eq!(&rows[0][26], "");
