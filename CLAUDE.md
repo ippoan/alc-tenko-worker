@@ -32,6 +32,9 @@ URL が無ければ失敗 (skip しない)。接続ロールは `alc_api_rt`。
   SELECT が USING (true) の番号・乗務員の表を読む文だけで、nil のテナントの transaction で流す。書き込みは引いたテナントで。
 - SQL に tenant_id を明示する (rust は RLS 任せの文があった)。絞り込みは文を組み立てず `($n IS NULL OR ...)` の 1 文。
 - 乗務員情報の任意の項目 (労働時間・指導・携行品・記録・点検・故障・整備) は項目ごとに別の transaction で読み、失敗は空の配列 (rust と同じ)。
+- 健康の基準値の血圧の有効時間 `bp_validity_minutes` (alc-migrations 222。rust に無い): NULL = 当日中 (日本時間)、数 = 分。体温の
+  `measurement_validity_minutes` とは別。作成で省略 = NULL。更新は来ていなければそのまま・`null` で当日中へ戻す・数で分 (ほかの欄の
+  「null は変えない」と違う)。0 以下は 400 `invalid_bp_validity`。使う側 (2 回までの数え・点呼に写す血圧) は alc-measurements-worker。
 - 予定超過の分数: 予定超過の確認 (`overdue.rs`) はテナントの `tenko_settings.overdue_minutes` (行が無ければ 60。`GET`・`PUT /tenko/settings`)。ダッシュボードの超過の一覧も同じ規則 (`overdue::sql::IS_OVERDUE` を共有)。
 - wasm32 で chrono の `Utc::now()` を使わない (時計は `AppState.clock`。Workers は `Date.now()`)。
 - DB は `PgClient::tenant_tx` + `query_typed` 系だけ。名前付き prepared statement 禁止。Row を tx の外へ出さない。

@@ -114,6 +114,80 @@ async fn baselines_crud() {
             .status,
         404
     );
+
+    // 血圧の有効時間 (alc-migrations 222): 作成で省略 = null (当日中)。更新は来ていなければそのまま・null で当日中へ戻す・数で分
+    assert_eq!(v["bp_validity_minutes"], json!(null));
+    let set = call(
+        &app,
+        "PUT",
+        &path,
+        Some(t),
+        Some(json!({ "bp_validity_minutes": 90 })),
+    )
+    .await;
+    assert_eq!(
+        (set.status, set.json()["bp_validity_minutes"].clone()),
+        (200, json!(90))
+    );
+    let kept = call(
+        &app,
+        "PUT",
+        &path,
+        Some(t),
+        Some(json!({ "baseline_diastolic": 85 })),
+    )
+    .await;
+    assert_eq!(
+        (
+            kept.json()["bp_validity_minutes"].clone(),
+            kept.json()["measurement_validity_minutes"].clone()
+        ),
+        (json!(90), json!(30))
+    );
+    let cleared = call(
+        &app,
+        "PUT",
+        &path,
+        Some(t),
+        Some(json!({ "bp_validity_minutes": null })),
+    )
+    .await;
+    assert_eq!(cleared.json()["bp_validity_minutes"], json!(null));
+    // 0 以下は 400 (作成も更新も)。書かない
+    for (method, p, body) in [
+        ("PUT", path.as_str(), json!({ "bp_validity_minutes": 0 })),
+        (
+            "POST",
+            "/api/tenko/health-baselines",
+            json!({ "employee_id": e, "bp_validity_minutes": -5 }),
+        ),
+    ] {
+        let bad = call(&app, method, p, Some(t), Some(body)).await;
+        assert_eq!(
+            (bad.status, bad.json()),
+            (400, json!({ "error": "invalid_bp_validity" })),
+            "{method}"
+        );
+    }
+    let created = call(
+        &app,
+        "POST",
+        "/api/tenko/health-baselines",
+        Some(t),
+        Some(json!({ "employee_id": e, "bp_validity_minutes": 45 })),
+    )
+    .await;
+    assert_eq!(created.json()["bp_validity_minutes"], json!(45));
+    let row = admin()
+        .await
+        .query_one(
+            "SELECT bp_validity_minutes FROM alc_api.employee_health_baselines WHERE employee_id = $1",
+            &[&e],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, Option<i32>>(0), Some(45));
+
     assert_eq!(call(&app, "DELETE", &path, Some(t), None).await.status, 204);
     assert_eq!(call(&app, "DELETE", &path, Some(t), None).await.status, 404);
 }

@@ -217,12 +217,14 @@ pub struct EmployeeHealthBaseline {
     pub measurement_validity_minutes: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// 血圧の有効時間 (分。alc-migrations 222)。null = 当日中 (日本時間)。体温の `measurement_validity_minutes` とは別
+    pub bp_validity_minutes: Option<i32>,
 }
 
 pub const BASELINE_COLUMNS: &str =
     "id, tenant_id, employee_id, baseline_systolic, baseline_diastolic, \
      baseline_temperature, systolic_tolerance, diastolic_tolerance, temperature_tolerance, \
-     measurement_validity_minutes, created_at, updated_at";
+     measurement_validity_minutes, created_at, updated_at, bp_validity_minutes";
 
 pub fn baseline(r: &Row) -> EmployeeHealthBaseline {
     EmployeeHealthBaseline {
@@ -238,6 +240,7 @@ pub fn baseline(r: &Row) -> EmployeeHealthBaseline {
         measurement_validity_minutes: r.get(9),
         created_at: r.get(10),
         updated_at: r.get(11),
+        bp_validity_minutes: r.get(12),
     }
 }
 
