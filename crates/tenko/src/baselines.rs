@@ -4,16 +4,22 @@
 //! - `GET /tenko/health-baselines` — 一覧 (作成の新しい順)
 //! - `GET`・`PUT`・`DELETE /tenko/health-baselines/{employee_id}` — 1 件・更新 (null の欄は変えない)・削除 (204)。無ければ 404
 //!
+//! 血圧の有効時間 `bp_validity_minutes` (alc-migrations 222。rust に無い): NULL = 当日中 (日本時間)、数 = 分。体温の有効時間
+//! `measurement_validity_minutes` とは別。作成で省略すれば NULL (当日中)。更新は**来ていなければそのまま・`null` なら当日中へ戻す・
+//! 数ならその分** (ほかの欄の「null は変えない」と違う。当日中へ戻す手段が null しか無いため)。0 以下は 400 `invalid_bp_validity`
+//!
 //! この表は dev の軸を持たない (rust と同じ)。
 
 use alc_core_wasm::TenantId;
 use alc_worker_db::PgClient;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use const_format::concatcp;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use serde_json::json;
 use tokio_postgres::types::Type;
 use tokio_postgres::Error;
 use uuid::Uuid;
@@ -32,6 +38,9 @@ pub struct CreateBaseline {
     pub diastolic_tolerance: Option<i32>,
     pub temperature_tolerance: Option<f64>,
     pub measurement_validity_minutes: Option<i32>,
+    /// 血圧の有効時間 (分)。省略・null = 当日中
+    #[serde(default)]
+    pub bp_validity_minutes: Option<i32>,
 }
 
 /// rust の `UpdateHealthBaseline`
@@ -44,16 +53,39 @@ pub struct UpdateBaseline {
     pub diastolic_tolerance: Option<i32>,
     pub temperature_tolerance: Option<f64>,
     pub measurement_validity_minutes: Option<i32>,
+    /// 血圧の有効時間。来ていない = `None` (変えない)、`null` = `Some(None)` (当日中へ戻す)、数 = `Some(Some(分))`
+    #[serde(default, deserialize_with = "present")]
+    pub bp_validity_minutes: Option<Option<i32>>,
+}
+
+/// 来ていた欄を `Some` で包む (`null` も「来ていた」として `Some(None)` にする)。来ていなければ `#[serde(default)]` の `None`
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<i32>>, D::Error> {
+    Option::<i32>::deserialize(d).map(Some)
+}
+
+/// 血圧の有効時間の分が 1 以上か (NULL = 当日中は通す。0 以下は表の CHECK が拒むので先に 400 にする)
+fn valid_bp_validity(v: Option<i32>) -> bool {
+    v.is_none_or(|n| n > 0)
+}
+
+fn invalid_bp_validity() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": "invalid_bp_validity" })),
+    )
+        .into_response()
 }
 
 pub mod sql {
     use super::*;
 
-    /// 作成か上書き。$1 tenant_id / $2 employee_id / $3〜$9 の値 (既定値は呼び手が埋める)
+    /// 作成か上書き。$1 tenant_id / $2 employee_id / $3〜$9 の値 (既定値は呼び手が埋める) /
+    /// $10 (更新と同じ形のための印。作成では常に true) / $11 血圧の有効時間 (NULL = 当日中)
     pub const UPSERT: &str = concatcp!(
         "INSERT INTO alc_api.employee_health_baselines (tenant_id, employee_id, baseline_systolic, baseline_diastolic, \
-             baseline_temperature, systolic_tolerance, diastolic_tolerance, temperature_tolerance, measurement_validity_minutes) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             baseline_temperature, systolic_tolerance, diastolic_tolerance, temperature_tolerance, measurement_validity_minutes, \
+             bp_validity_minutes) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $10 THEN $11 END) \
          ON CONFLICT (tenant_id, employee_id) DO UPDATE SET \
              baseline_systolic = EXCLUDED.baseline_systolic, \
              baseline_diastolic = EXCLUDED.baseline_diastolic, \
@@ -62,6 +94,7 @@ pub mod sql {
              diastolic_tolerance = EXCLUDED.diastolic_tolerance, \
              temperature_tolerance = EXCLUDED.temperature_tolerance, \
              measurement_validity_minutes = EXCLUDED.measurement_validity_minutes, \
+             bp_validity_minutes = EXCLUDED.bp_validity_minutes, \
              updated_at = NOW() \
          RETURNING ",
         BASELINE_COLUMNS
@@ -80,7 +113,7 @@ pub mod sql {
         " FROM alc_api.employee_health_baselines WHERE tenant_id = $1 AND employee_id = $2"
     );
 
-    /// $1 tenant_id / $2 employee_id / $3〜$9 の値 (null は変えない)
+    /// $1 tenant_id / $2 employee_id / $3〜$9 の値 (null は変えない) / $10 血圧の有効時間を書くか / $11 その値 (NULL = 当日中)
     pub const UPDATE: &str = concatcp!(
         "UPDATE alc_api.employee_health_baselines SET \
              baseline_systolic = COALESCE($3, baseline_systolic), \
@@ -90,6 +123,7 @@ pub mod sql {
              diastolic_tolerance = COALESCE($7, diastolic_tolerance), \
              temperature_tolerance = COALESCE($8, temperature_tolerance), \
              measurement_validity_minutes = COALESCE($9, measurement_validity_minutes), \
+             bp_validity_minutes = CASE WHEN $10 THEN $11 ELSE bp_validity_minutes END, \
              updated_at = NOW() \
          WHERE tenant_id = $1 AND employee_id = $2 RETURNING ",
         BASELINE_COLUMNS
@@ -130,10 +164,12 @@ async fn write(
     tenant_id: Uuid,
     employee_id: Uuid,
     v: Values,
+    bp: Option<Option<i32>>,
 ) -> Result<Option<EmployeeHealthBaseline>, Error> {
+    let (set_bp, bp) = (bp.is_some(), bp.flatten());
     pg.tenant_tx(tenant_id, move |tx| {
         Box::pin(async move {
-            let args: [Arg; 9] = [
+            let args: [Arg; 11] = [
                 (&tenant_id, Type::UUID),
                 (&employee_id, Type::UUID),
                 (&v.0, Type::INT4),
@@ -143,6 +179,8 @@ async fn write(
                 (&v.4, Type::INT4),
                 (&v.5, Type::FLOAT8),
                 (&v.6, Type::INT4),
+                (&set_bp, Type::BOOL),
+                (&bp, Type::INT4),
             ];
             let row = tx.query_typed_opt(statement, &args).await?;
             Ok(row.as_ref().map(baseline))
@@ -216,22 +254,30 @@ async fn upsert_handler(
     State(state): State<AppState>,
     Extension(TenantId(tenant_id)): Extension<TenantId>,
     Json(body): Json<CreateBaseline>,
-) -> Result<(StatusCode, Json<EmployeeHealthBaseline>), StatusCode> {
+) -> Response {
+    if !valid_bp_validity(body.bp_validity_minutes) {
+        return invalid_bp_validity();
+    }
     let mut pg = state.pg.lock().await;
-    let row = write(
+    let row = match write(
         &mut pg,
         sql::UPSERT,
         tenant_id,
         body.employee_id,
         with_defaults(&body),
+        Some(body.bp_validity_minutes),
     )
     .await
-    .map_err(|e| state.db_fail("baseline upsert", &e))?;
+    {
+        Ok(row) => row,
+        Err(e) => return state.db_fail("baseline upsert", &e).into_response(),
+    };
     // INSERT ... ON CONFLICT DO UPDATE は必ず 1 行を返す
-    Ok((
+    (
         StatusCode::CREATED,
         Json(row.expect("upsert returns a row")),
-    ))
+    )
+        .into_response()
 }
 
 async fn list_handler(
@@ -263,7 +309,10 @@ async fn update_handler(
     Extension(TenantId(tenant_id)): Extension<TenantId>,
     Path(employee_id): Path<Uuid>,
     Json(b): Json<UpdateBaseline>,
-) -> Result<Json<EmployeeHealthBaseline>, StatusCode> {
+) -> Response {
+    if !valid_bp_validity(b.bp_validity_minutes.flatten()) {
+        return invalid_bp_validity();
+    }
     let values = (
         b.baseline_systolic,
         b.baseline_diastolic,
@@ -274,11 +323,20 @@ async fn update_handler(
         b.measurement_validity_minutes,
     );
     let mut pg = state.pg.lock().await;
-    write(&mut pg, sql::UPDATE, tenant_id, employee_id, values)
-        .await
-        .map_err(|e| state.db_fail("baseline update", &e))?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+    match write(
+        &mut pg,
+        sql::UPDATE,
+        tenant_id,
+        employee_id,
+        values,
+        b.bp_validity_minutes,
+    )
+    .await
+    {
+        Err(e) => state.db_fail("baseline update", &e).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Some(row)) => Json(row).into_response(),
+    }
 }
 
 async fn delete_handler(
